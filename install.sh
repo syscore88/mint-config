@@ -426,7 +426,7 @@ download_deb() { wget -q --timeout=30 -O "$3" "$2" || rm -f "$3"; }
 get_github_deb_url() { curl -sf "https://api.github.com/repos/${1}/releases/latest" | grep "browser_download_url.*${2}" | cut -d '"' -f 4 || true; }
 
 download_deb "Discord" "https://discord.com/api/download?platform=linux&format=deb" "$DEB_DIR/discord.deb"
-OPENCODE_URL=$(get_github_deb_url "opencode-ai/opencode" "opencode.*deb")
+OPENCODE_URL=$(get_github_deb_url "sst/opencode" "opencode-desktop-linux-amd64\\.deb")
 [[ -n "$OPENCODE_URL" ]] && download_deb "opencode-desktop" "$OPENCODE_URL" "$DEB_DIR/opencode-desktop.deb"
 LSFG_URL=$(get_github_deb_url "YuriSizov/ls-fg" "ls-fg_.*deb")
 LSFG_VK_URL=$(get_github_deb_url "YuriSizov/ls-fg-vk" "deb")
@@ -455,7 +455,8 @@ show_progress 8 $TOTAL_STEPS "$MSG_PHASE_3"
 wait_for_apt
 sudo apt-get install -yq virt-manager qemu-system qemu-utils libvirt-daemon-system libvirt-clients ovmf dnsmasq bluetooth bluez bluez-firmware bluez-tools ufw || true
 
-dconf load /org/virt-manager/virt-manager/ <<'EOF'
+if command -v dconf &>/dev/null; then
+    dconf load /org/virt-manager/virt-manager/ <<'EOF'
 [/]
 manager-window-height=297
 manager-window-width=478
@@ -494,6 +495,9 @@ network-traffic=false
 autoconnect=1
 vm-window-size=(1280, 842)
 EOF
+else
+    log_warn "Brak polecenia dconf – pomijam wczytanie ustawień virt-managera." "dconf command not found – skipping virt-manager settings import."
+fi
 
 for svc in libvirtd virtqemud; do
     if systemctl list-unit-files "${svc}.service" 2>/dev/null | grep -q "$svc"; then
