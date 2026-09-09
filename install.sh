@@ -1,16 +1,16 @@
 #!/bin/bash
 # ==========================================================
-# KOMPLEKSOWY SKRYPT KONFIGURACYJNY SYSTEMU (LINUX MINT)
+# KOMPLEKSOWY SKRYPT KONFIGURACYJNY SYSTEMU (OPENSUSE TUMBLEWEED)
 # ==========================================================
 
-set -Eeuo pipefail
-export DEBIAN_FRONTEND=noninteractive
+set -euo pipefail
+export ZYPPER_NONINTERACTIVE=1 
 export PATH="/usr/sbin:/sbin:$PATH"
 
 detect_system_lang() { 
     local sys_lang="${LANG:-}"
     [[ -z "$sys_lang" ]] && sys_lang="${LC_ALL:-${LC_MESSAGES:-}}"
-    if [[ "$sys_lang" == pl_PL* || "$sys_lang" == pl* ]]; then
+    if [[ "$sys_lang" == pl* ]]; then
         echo "pl"
     else
         echo "en"
@@ -18,31 +18,13 @@ detect_system_lang() {
 }
 SCRIPT_LANG="$(detect_system_lang)"
 
-detect_system_locale() {
-    local sys_locale="${LANG:-}"
-    [[ -z "$sys_locale" ]] && sys_locale="${LC_ALL:-${LC_MESSAGES:-}}"
-    [[ -z "$sys_locale" ]] && sys_locale="en_US.UTF-8"
-
-    if command -v locale &>/dev/null; then
-        local available
-        available="$(locale -a 2>/dev/null)"
-        if echo "$available" | grep -qiF "$sys_locale" || \
-           echo "$available" | grep -qiF "$(echo "$sys_locale" | sed 's/UTF-8/utf8/')"; then
-            echo "$sys_locale"
-            return
-        fi
-    fi
-    echo "en_US.UTF-8"
-}
-SYSTEM_LOCALE="$(detect_system_locale)"
-
 INFO='\033[0;34m'
 SUCCESS='\033[0;32m'
 WARN='\033[0;33m'
 ERR='\033[0;31m'
 NC='\033[0m'
 
-TMP_LOG="$(mktemp /tmp/mint-install-log.XXXXXX)"
+TMP_LOG="$(mktemp /tmp/opensuse-install-log.XXXXXX)"
 LOG_FILE="$HOME/install_error_$(date +%Y%m%d_%H%M%S).log"
 
 exec 3>&1
@@ -51,13 +33,14 @@ exec >>"$TMP_LOG" 2>&1
 cleanup_on_exit() {
     local exit_code=$?
     printf '\033[?7h' >&3
+    [[ -n "${RPM_DIR:-}" && -d "$RPM_DIR" ]] && rm -rf "$RPM_DIR"
     if [ "$exit_code" -ne 0 ]; then
         echo -e "\n" >&3
         cp -f "$TMP_LOG" "$LOG_FILE" 2>/dev/null || true
         if [[ "$SCRIPT_LANG" == "pl" ]]; then
-            echo -e "${ERR}✖ Wystąpił błąd (kod: $exit_code). Szczegółowy log zapisano w: $LOG_FILE${NC}" >&3
+            echo -e "${ERR}✘ Wystąpił błąd (kod: $exit_code). Szczegółowy log zapisano w: $LOG_FILE${NC}" >&3
         else
-            echo -e "${ERR}✖ An error occurred (code: $exit_code). Detailed log saved to: $LOG_FILE${NC}" >&3
+            echo -e "${ERR}✘ An error occurred (code: $exit_code). Detailed log saved to: $LOG_FILE${NC}" >&3
         fi
     fi
     rm -f "$TMP_LOG"
@@ -108,36 +91,31 @@ show_progress() {
 }
 
 if [[ "$SCRIPT_LANG" == "pl" ]]; then
-    MSG_PHASE_1="[1/4] Konfiguracja repozytoriów i optymalizacja systemu..."
-    MSG_PHASE_2="[2/4] Instalacja pakietów systemowych, Flatpak i .deb..."
-    MSG_PHASE_3="[3/4] Konfiguracja usług i środowiska ZSH..."
-    MSG_PHASE_4="[4/4] Zakończenie i sprzątanie..."
+    MSG_PHASE_1="[1/3] Konfiguracja repozytoriów i optymalizacja systemu..."
+    MSG_PHASE_2="[2/3] Instalacja pakietów systemowych, bibliotek 32-bit i Flatpak..."
+    MSG_PHASE_3="[3/3] Konfiguracja usług, bootloadera i środowiska ZSH..."
 else
-    MSG_PHASE_1="[1/4] Repository configuration and system optimization..."
-    MSG_PHASE_2="[2/4] Installing system packages, Flatpak, and .deb..."
-    MSG_PHASE_3="[3/4] Configuring services and ZSH environment..."
-    MSG_PHASE_4="[4/4] Finishing up and cleaning..."
+    MSG_PHASE_1="[1/3] Repository and system configuration..."
+    MSG_PHASE_2="[2/3] Installing system packages, 32-bit libraries, and Flatpak..."
+    MSG_PHASE_3="[3/3] Configuring services, bootloader, and ZSH environment..."
 fi
 
 TOTAL_STEPS=12
-
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" &> /dev/null && pwd)"
 CURRENT_USER=$(whoami)
-DEB_DIR="/tmp/debs_$$"
+RPM_DIR="$(mktemp -d /tmp/rpm_install_XXXXXX)"
 
-source /etc/os-release
-OS_CODENAME="${UBUNTU_CODENAME:-${VERSION_CODENAME:-}}"
-echo "Wykryty system: ${PRETTY_NAME:-nieznany}, codename: ${OS_CODENAME:-nieznany}"
 if [[ "$EUID" -eq 0 ]]; then
-    if [[ "$SCRIPT_LANG" == "pl" ]]; then
-        echo -e "${ERR}✖ Nie uruchamiaj skryptu jako root. Użyj zwykłego użytkownika z sudo.${NC}" >&3
-    else
-        echo -e "${ERR}✖ Do not run as root. Use a regular user with sudo privileges.${NC}" >&3
-    fi
+    echo -e "${ERR}✘ Nie uruchamiaj skryptu jako root. Uruchom jako zwykły użytkownik z uprawnieniami sudo.${NC}" >&3
     exit 1
 fi
 
 printf '\033[?7h\n' >&3
+
+if [[ -z "$CURRENT_USER" ]]; then
+    echo -e "${ERR}✘ Nie udało się ustalić bieżącego użytkownika (whoami zwróciło pusty ciąg).${NC}" >&3
+    exit 1
+fi
 
 RUN0_NOPASSWD_FILE="/etc/polkit-1/rules.d/51-run0-nopasswd.rules"
 USE_RUN0=0
@@ -152,88 +130,22 @@ if [[ "$USE_RUN0" -eq 1 ]]; then
     sudo systemctl try-restart polkit 2>/dev/null || true
 else
     SUDOERS_TMP="$(mktemp)"
-    echo "$CURRENT_USER ALL=(ALL) NOPASSWD: ALL" > "$SUDOERS_TMP"
+    printf '%s ALL=(ALL:ALL) NOPASSWD: ALL\n' "$CURRENT_USER" > "$SUDOERS_TMP"
+
     if sudo visudo -cf "$SUDOERS_TMP" &>/dev/null; then
         sudo install -m 0440 -o root -g root "$SUDOERS_TMP" /etc/sudoers.d/99-temp-installer
+        rm -f "$SUDOERS_TMP"
     else
         rm -f "$SUDOERS_TMP"
-        if [[ "$SCRIPT_LANG" == "pl" ]]; then
-            echo -e "${ERR}✖ Nieprawidłowa składnia reguły sudoers - przerywam.${NC}" >&3
-        else
-            echo -e "${ERR}✖ Invalid sudoers rule syntax - aborting.${NC}" >&3
-        fi
+        echo -e "${ERR}✘ Nieprawidłowa składnia pliku sudoers – przerywam.${NC}" >&3
         exit 1
     fi
-    rm -f "$SUDOERS_TMP"
 fi
 
 printf '\033[?7l' >&3
 
-safe_apt_update() {
-    local out rc
-    set +e
-    out=$(sudo apt-get update -yq 2>&1)
-    rc=$?
-    set -e
-    echo "$out"
-    [[ $rc -eq 0 ]] && return 0
-
-    local broken_urls
-    broken_urls=$(echo "$out" | grep -oP '(?:Błąd|Err|Fehler|Erreur|Errore|Erro):[0-9]+ \Khttps?://\S+')
-    broken_urls+=$'\n'"$(echo "$out" | grep -oP '^\S+:[0-9]+ \Khttps?://\S+(?= )')"
-    broken_urls=$(echo "$broken_urls" | sort -u | grep -v '^$' || true)
-    local removed=0
-    while IFS= read -r url; do
-        [[ -z "$url" ]] && continue
-        local host_path="${url#http://}"
-        host_path="${host_path#https://}"
-        for f in /etc/apt/sources.list.d/*.list /etc/apt/sources.list.d/*.sources; do
-            [[ -f "$f" ]] || continue
-            if grep -qF "$host_path" "$f" 2>/dev/null; then
-                sudo rm -f "$f"
-                removed=1
-            fi
-        done
-    done <<< "$broken_urls"
-
-    if [[ $removed -eq 1 ]]; then
-        wait_for_apt
-        sudo apt-get update -yq || true
-        return 0
-    else
-        return 0
-    fi
-}
-
-wait_for_apt() {
-    sudo systemctl stop packagekit 2>/dev/null || true
-    while sudo fuser /var/lib/apt/lists/lock >/dev/null 2>&1 || \
-          sudo fuser /var/lib/dpkg/lock-frontend >/dev/null 2>&1 || \
-          sudo killall -0 apt apt-get dpkg 2>/dev/null; do
-        sleep 3
-    done
-}
-
-add_ppa_and_install() {
-    local ppa="$1"; shift
-    local packages=("$@")
-
-    if ! command -v add-apt-repository &>/dev/null; then return 1; fi
-    if ! sudo add-apt-repository -y "ppa:$ppa" 2>/dev/null; then return 1; fi
-
-    wait_for_apt
-    if sudo apt-get update -yq && sudo apt-get install -yq "${packages[@]}"; then
-        return 0
-    fi
-
-    sudo add-apt-repository --remove -y "ppa:$ppa" 2>/dev/null || true
-    wait_for_apt
-    sudo apt-get update -yq || true
-    return 1
-}
-
 # ==========================================================
-# 1. PRZYGOTOWANIE I REPOZYTORIA
+#  ETAP 1/3: KONFIGURACJA REPOZYTORIÓW I OPTYMALIZACJA SYSTEMU
 # ==========================================================
 show_progress 0 $TOTAL_STEPS "$MSG_PHASE_1"
 
@@ -252,114 +164,120 @@ if [[ -d "$SCRIPT_DIR/.config" ]]; then
     cp -afT "$SCRIPT_DIR/.config" ~/.config
 fi
 
-wait_for_apt
-sudo sed -i '/cdrom/s/^/#/' /etc/apt/sources.list 2>/dev/null || true
-sudo dpkg --add-architecture i386 || true
-
-if command -v add-apt-repository &>/dev/null; then
-    sudo add-apt-repository -y universe  2>/dev/null || true
-    sudo add-apt-repository -y multiverse 2>/dev/null || true
-fi
-
 show_progress 1 $TOTAL_STEPS "$MSG_PHASE_1"
 
-wait_for_apt
-safe_apt_update
-for pkg in curl wget gnupg pciutils dconf-cli; do
-    sudo apt-get install -yq "$pkg" || true
-done
-sudo mkdir -p /etc/apt/keyrings
-sudo chmod 755 /etc/apt/keyrings
+sudo systemctl stop packagekit.service 2>/dev/null || true
+sudo killall -9 packagekitd 2>/dev/null || true
 
-if [ ! -f /etc/apt/keyrings/google-chrome.gpg ]; then
-    curl -fsSL https://dl.google.com/linux/linux_signing_key.pub | sudo gpg --dearmor --yes -o /etc/apt/keyrings/google-chrome.gpg
-    sudo chmod 644 /etc/apt/keyrings/google-chrome.gpg
-    echo "deb [arch=amd64 signed-by=/etc/apt/keyrings/google-chrome.gpg] http://dl.google.com/linux/chrome/deb/ stable main" | sudo tee /etc/apt/sources.list.d/google-chrome.list > /dev/null
-fi
+for pkg in curl wget pciutils gpg2 dconf; do
+    sudo zypper install -y "$pkg" || true
+done
 
 show_progress 2 $TOTAL_STEPS "$MSG_PHASE_1"
 
-sudo mkdir -p /usr/share/keyrings
-sudo rm -f /usr/share/keyrings/brave-browser-archive-keyring.gpg
+sudo zypper addrepo -cfp 90 https://ftp.gwdg.de/pub/linux/misc/packman/suse/openSUSE_Tumbleweed/ packman || true
+sudo rpm --import https://ftp.gwdg.de/pub/linux/misc/packman/suse/openSUSE_Tumbleweed/repodata/repomd.xml.key 2>/dev/null || true
+
+sudo zypper addrepo -cfp 80 https://download.opensuse.org/repositories/games/openSUSE_Tumbleweed/ games || true
+sudo zypper addrepo -cfp 80 https://download.opensuse.org/repositories/Emulators/openSUSE_Tumbleweed/ emulators || true
+sudo zypper addrepo -cfp 80 https://download.opensuse.org/repositories/Emulators:/Wine/openSUSE_Tumbleweed/ emulators-wine || true
+
+sudo zypper addrepo -cfp 80 https://dl.google.com/linux/chrome/rpm/stable/x86_64 google-chrome || true
+sudo rpm --import https://dl.google.com/linux/linux_signing_key.pub 2>/dev/null || true
+
 BRAVE_KEY_ID="0686B78420038257"
-BRAVE_GNUPGHOME="$(mktemp -d)"
-BRAVE_KEY_OK=0
-if gpg --homedir "$BRAVE_GNUPGHOME" --keyserver hkps://keyserver.ubuntu.com --recv-keys "$BRAVE_KEY_ID" \
-    || gpg --homedir "$BRAVE_GNUPGHOME" --keyserver hkps://keys.openpgp.org --recv-keys "$BRAVE_KEY_ID"; then
-    if gpg --homedir "$BRAVE_GNUPGHOME" --export "$BRAVE_KEY_ID" | sudo tee /usr/share/keyrings/brave-browser-archive-keyring.gpg > /dev/null \
-        && [[ -s /usr/share/keyrings/brave-browser-archive-keyring.gpg ]]; then
-        BRAVE_KEY_OK=1
+if ! sudo rpm --import https://brave-browser-rpm-release.s3.brave.com/brave-core.asc 2>/dev/null; then
+    BRAVE_GNUPGHOME="$(mktemp -d)"
+    KEY_FETCHED=true
+    if ! gpg --homedir "$BRAVE_GNUPGHOME" --keyserver hkps://keyserver.ubuntu.com --recv-keys "$BRAVE_KEY_ID" 2>/dev/null; then
+        if ! gpg --homedir "$BRAVE_GNUPGHOME" --keyserver hkps://keys.openpgp.org --recv-keys "$BRAVE_KEY_ID" 2>/dev/null; then
+            KEY_FETCHED=false
+        fi
     fi
-fi
-rm -rf "$BRAVE_GNUPGHOME"
-
-if [[ "$BRAVE_KEY_OK" -eq 1 ]]; then
-    sudo chmod 644 /usr/share/keyrings/brave-browser-archive-keyring.gpg
-    sudo curl -fsSLo /etc/apt/sources.list.d/brave-browser-release.sources https://brave-browser-apt-release.s3.brave.com/brave-browser.sources || true
-else
-    sudo rm -f /usr/share/keyrings/brave-browser-archive-keyring.gpg
+    if [ "$KEY_FETCHED" = true ]; then
+        gpg --homedir "$BRAVE_GNUPGHOME" --armor --export "$BRAVE_KEY_ID" > "$BRAVE_GNUPGHOME/brave-core.asc" 2>/dev/null || true
+        sudo rpm --import "$BRAVE_GNUPGHOME/brave-core.asc" 2>/dev/null || true
+    fi
+    rm -rf "$BRAVE_GNUPGHOME"
 fi
 
-wait_for_apt
-safe_apt_update
-sudo apt-get upgrade -yq || true
+sudo zypper addrepo https://brave-browser-rpm-release.s3.brave.com/brave-browser.repo || true
+
+sudo zypper --gpg-auto-import-keys refresh || true
+sudo zypper dup -y --allow-vendor-change || true
 
 show_progress 3 $TOTAL_STEPS "$MSG_PHASE_1"
 
-wait_for_apt
-sudo apt-get install -yq linux-firmware || true
+TO_REMOVE=(
+    opensuse-welcome-launcher plasma-welcome dragonplayer elisa
+    nano konqueror plasma-browser-integration plasma-vault
+    plasma-thunderbolt kontact kmail kontrast krdp krfb
+    kaddressbook kdepim-runtime akonadi-server akregator
+    epiphany decibels korganizer kwalletmanager rhythmbox showtime
+    gnome-calendar gnome-clocks gnome-user-docs gnome-contacts
+    gnome-maps gnome-weather yelp evolution evolution-common
+    evolution-plugins evolution-ews parole gnome-music
+)
+for pkg in "${TO_REMOVE[@]}"; do
+    if rpm -q "$pkg" &>/dev/null; then
+        sudo zypper remove -y "$pkg" 2>/dev/null || true
+    fi
+done
+sudo zypper autoremove -y 2>/dev/null || true
 
-PACKAGES_REMOVE=()
-if [[ ${#PACKAGES_REMOVE[@]} -gt 0 ]]; then
-    for pkg in "${PACKAGES_REMOVE[@]}"; do
-        if dpkg -l | grep -q "^ii  $pkg "; then
-            sudo apt-get purge -yq "$pkg" || true
-        fi
-    done
+rm -rf ~/.local/share/akonadi ~/.local/share/kmail2 ~/.local/share/local-mail ~/.local/share/contacts ~/.local/share/korganizer ~/.local/share/akregator ~/.local/share/kontact ~/.local/share/konqueror
+rm -rf ~/.config/akonadi* ~/.config/kmail* ~/.config/kontact* ~/.config/korganizer* ~/.config/kaddressbook* ~/.config/akregator* ~/.config/emailidentities ~/.config/mailtransports
+rm -rf ~/.cache/akonadi* ~/.cache/kmail* ~/.cache/kontact* ~/.cache/korganizer* ~/.cache/kaddressbook* ~/.cache/akregator* ~/.cache/konqueror*
+rm -rf ~/.local/share/{epiphany,decibels,gnome-user-docs,gnome-contacts,gnome-maps,gnome-weather,evolution,gnome-music,parole,rhythmbox,showtime,epiphany,decibels,dragonplayer,elisa}
+rm -rf ~/.config/{epiphany,decibels,gnome-user-docs,gnome-contacts,gnome-maps,gnome-weather,evolution,gnome-music,parole,rhythmbox,showtime,epiphany,decibels,dragonplayer,elisa}
+rm -rf ~/.cache/{epiphany,decibels,gnome-user-docs,gnome-contacts,gnome-maps,gnome-weather,evolution,gnome-music,parole,rhythmbox,showtime,epiphany,decibels,dragonplayer,elisa}
+
+if rpm -q plasma-desktop &>/dev/null || rpm -q plasma-workspace &>/dev/null; then
+    mkdir -p ~/.config
+    cat > ~/.config/kwalletrc << 'EOF'
+[Wallet]
+Close When Idle=false
+Close on Screensaver=false
+Default Wallet=kdewallet
+Enabled=false
+First Use=false
+Idle Timeout=10
+Launch Manager=false
+Leave Manager Open=false
+Leave Open=true
+Prompt on Open=false
+Use One Wallet=true
+
+[org.freedesktop.secrets]
+apiEnabled=false
+EOF
 fi
-sudo apt-get autoremove -yq || true
 
 # ==========================================================
-# 2. INSTALACJA PAKIETÓW I FLATPAK
+#  ETAP 2/3: INSTALACJA PAKIETÓW, BIBLIOTEK 32-BIT I FLATPAK
 # ==========================================================
 show_progress 4 $TOTAL_STEPS "$MSG_PHASE_2"
 
-wait_for_apt
-PACKAGES_INSTALL=(
-    google-chrome-stable brave-origin gmic mixxx kdenlive gimp soundconverter
-    vim dconf-editor hunspell-pl bleachbit profile-sync-daemon git build-essential
-    unrar-free mc btrfs-progs exfatprogs ntfs-3g os-prober
-    adb fastboot fsarchiver inxi pv rsync p7zip-full makeself zenity innoextract needrestart flatpak timeshift
-    python3-defusedxml python3-packaging python3-pip python3-tqdm
-    libayatana-appindicator3-1 gamemode vulkan-tools mangohud vkd3d-compiler goverlay winetricks
-    gcc make cmake meson ninja-build
-    gstreamer1.0-plugins-good gstreamer1.0-plugins-bad gstreamer1.0-plugins-ugly
-    zsh zsh-syntax-highlighting zsh-autosuggestions
+sudo zypper install -y google-chrome-stable || true
+sudo zypper install -y brave-origin || true
+
+PACKAGES=(
+    dconf-editor fastfetch unrar git mc android-tools pv zenity innoextract
+    audacity gimp gmic mixxx kdenlive kolourpaint soundconverter handbrake-gui
+    telegram-desktop qbittorrent thunderbird MozillaThunderbird-translations-common
+    bleachbit makeself vim cdemu-daemon cdemu-client vlc vlc-codecs
+    gamemode gamescope mangohud goverlay libvkd3d1 wine-staging wine-mono wine-gecko
+    cmake meson patterns-devel-base-devel_basis kernel-devel
+    gstreamer-plugins-ugly qmmp qmmp-plugin-pack 
+    zsh
 )
-if ! sudo apt-get install -yq "${PACKAGES_INSTALL[@]}"; then
-    FAILED_PACKAGES=()
-    for pkg in "${PACKAGES_INSTALL[@]}"; do
-        if ! sudo apt-get install -yq "$pkg" > /tmp/install-"$pkg".log 2>&1; then
-            FAILED_PACKAGES+=("$pkg")
-        fi
-    done
-fi
 
-show_progress 5 $TOTAL_STEPS "$MSG_PHASE_2"
-
-if command -v flatpak &>/dev/null; then
-    sudo flatpak remote-add --if-not-exists flathub https://dl.flathub.org/repo/flathub.flatpakrepo || true
-fi
-
-add_ppa_and_install "atareao/telegram" telegram || true
-add_ppa_and_install "zhangsongcui3371/fastfetch" fastfetch || true
-
-if ! add_ppa_and_install "stebbins/handbrake-releases" handbrake handbrake-cli; then
-    wait_for_apt
-    sudo apt-get install -yq handbrake handbrake-cli || true
-fi
-
-add_ppa_and_install "cdemu/ppa" cdemu-daemon cdemu-client || true
+for pkg in "${PACKAGES[@]}"; do
+    if sudo zypper install -y --allow-vendor-change "$pkg" 2>/dev/null; then
+        continue
+    fi
+    sudo zypper install -y --allow-vendor-change --from packman "$pkg" 2>/dev/null || true
+done
 
 sudo systemctl disable --now cdemu-daemon 2>/dev/null || true
 sudo systemctl mask cdemu-daemon 2>/dev/null || true
@@ -376,87 +294,146 @@ for f in /etc/xdg/autostart/gcdemu.desktop /etc/xdg/autostart/cdemu.desktop /usr
 done
 pkill -f gcdemu 2>/dev/null || true
 
-if command -v flatpak &>/dev/null; then
-    sudo flatpak install -y flathub com.github.tchx84.Flatseal || true
+show_progress 5 $TOTAL_STEPS "$MSG_PHASE_2"
+
+PACKAGES_32=(
+    mangohud-32bit libgamemodeauto0-32bit libvkd3d1-32bit wine-staging-32bit
+    libopenal1-32bit libXdamage1-32bit libXtst6-32bit
+    libgtk-2_0-0-32bit libgtk-3-0-32bit
+)
+
+GPU_VENDOR=$(lspci -nn | grep -iE "VGA|3D|Display" || true)
+DRACUT_CONF="/etc/dracut.conf.d/90-gpu.conf"
+MESA_32_PKGS=(Mesa-libGL1-32bit Mesa-dri-32bit Mesa-libVulkan-32bit)
+
+GPU_HAS_NVIDIA=0
+GPU_HAS_AMD=0
+GPU_HAS_INTEL=0
+echo "$GPU_VENDOR" | grep -iq "nvidia" && GPU_HAS_NVIDIA=1
+echo "$GPU_VENDOR" | grep -iqE "amd|radeon" && GPU_HAS_AMD=1
+echo "$GPU_VENDOR" | grep -iq "intel" && GPU_HAS_INTEL=1
+
+GPU_VENDOR_COUNT=$(( GPU_HAS_NVIDIA + GPU_HAS_AMD + GPU_HAS_INTEL ))
+FORCE_DRIVERS=""
+
+if (( GPU_VENDOR_COUNT >= 2 )); then
+    log_info "Wykryto hybrydowy układ graficzny (więcej niż jedno GPU)." "Detected a hybrid GPU setup (more than one GPU)."
+fi
+
+if (( GPU_HAS_NVIDIA )); then
+    PACKAGES_32+=(libglvnd-32bit)
+    FORCE_DRIVERS+=" nvidia nvidia_modeset nvidia_uvm nvidia_drm"
+fi
+if (( GPU_HAS_AMD )); then
+    PACKAGES_32+=(libvulkan_radeon-32bit)
+    FORCE_DRIVERS+=" amdgpu"
+fi
+if (( GPU_HAS_INTEL )); then
+    PACKAGES_32+=(libvulkan_intel-32bit)
+    FORCE_DRIVERS+=" i915"
+fi
+
+if (( GPU_VENDOR_COUNT > 0 )); then
+    readarray -t PACKAGES_32 < <(printf '%s\n' "${PACKAGES_32[@]}" | awk '!seen[$0]++')
+    echo "force_drivers+=\"${FORCE_DRIVERS} \"" | sudo tee "$DRACUT_CONF" > /dev/null
+else
+    PACKAGES_32+=("${MESA_32_PKGS[@]}")
+    sudo rm -f "$DRACUT_CONF"
+fi
+
+for pkg in "${PACKAGES_32[@]}"; do
+    sudo zypper install -y --allow-vendor-change "$pkg" 2>/dev/null || true
+done
+
+if [[ -f "$DRACUT_CONF" ]]; then
+    sudo dracut --force || true
 fi
 
 show_progress 6 $TOTAL_STEPS "$MSG_PHASE_2"
 
-wait_for_apt
-sudo apt-get install -yq wine wine64 || true
+download_rpm() {
+    local name="$1" url="$2" dest="$3"
+    wget -q --timeout=30 -O "$dest" "$url" || rm -f "$dest"
+}
 
-VGA_INFO=$(lspci -nn | grep -iE "VGA|3D|Display" || true)
-MODULES_FILE="/etc/initramfs-tools/modules"
-add_module() { grep -q "^$1" "$MODULES_FILE" || echo "$1" | sudo tee -a "$MODULES_FILE" > /dev/null; }
-
-HAS_NVIDIA=0; HAS_AMD=0; HAS_INTEL=0
-echo "$VGA_INFO" | grep -iq "NVIDIA" && HAS_NVIDIA=1
-echo "$VGA_INFO" | grep -iq "AMD"    && HAS_AMD=1
-echo "$VGA_INFO" | grep -iq "Intel"  && HAS_INTEL=1
-
-wait_for_apt
-
-if [[ "$HAS_AMD" -eq 1 || "$HAS_INTEL" -eq 1 || ( "$HAS_NVIDIA" -eq 0 && "$HAS_AMD" -eq 0 && "$HAS_INTEL" -eq 0 ) ]]; then
-    sudo apt-get install -yq libgl1-mesa-dri:i386 mesa-vulkan-drivers:i386 || true
-fi
-[[ "$HAS_AMD" -eq 1 ]]   && add_module "amdgpu"
-[[ "$HAS_INTEL" -eq 1 ]] && add_module "i915"
-
-if [[ "$HAS_NVIDIA" -eq 1 ]]; then
-    NVIDIA_BRANCH=$(dpkg -l 2>/dev/null | grep -oP '^ii\s+nvidia-driver-\K[0-9]+' | sort -un | tail -1)
-    if [[ -n "$NVIDIA_BRANCH" ]]; then
-        sudo apt-get install -yq "libnvidia-gl-${NVIDIA_BRANCH}:i386" || true
+install_discord_rpm() {
+    local dest="$RPM_DIR/discord.rpm"
+    if wget -q --user-agent="Mozilla/5.0" "https://discord.com/api/download?platform=linux&format=rpm" -O "$dest"; then
+        if file "$dest" | grep -q "RPM"; then
+            sudo zypper install -y --allow-unsigned-rpm "$dest" 2>/dev/null || true
+        fi
+        rm -f "$dest"
     fi
-    add_module "nvidia"
-    add_module "nvidia_modeset"
-    add_module "nvidia_uvm"
-    add_module "nvidia_drm"
+}
+
+if sudo zypper repos 2>/dev/null | grep -iq "packman"; then
+    sudo zypper install -y discord 2>/dev/null || install_discord_rpm
+else
+    install_discord_rpm
 fi
 
-sudo update-initramfs -u || true
-sudo flatpak install -y flathub it.mijorus.gearlever || true
+LSFG_VK_URL=$(curl -sf https://api.github.com/repos/PancakeTAS/lsfg-vk/releases/latest | grep "browser_download_url.*lsfg-vk-.*x86_64\.rpm" | cut -d '"' -f 4 || true)
+[[ -n "$LSFG_VK_URL" ]] && download_rpm "lsfg-vk" "$LSFG_VK_URL" "$RPM_DIR/lsfg-vk.rpm"
 
-wait_for_apt
-sudo apt-get install -yq "linux-headers-$(uname -r)" || true
+OPENCODE_URL=$(curl -sfL https://api.github.com/repos/anomalyco/opencode/releases/latest | grep "browser_download_url.*opencode-desktop-linux-x86_64\.rpm" | cut -d '"' -f 4 || true)
+[[ -n "$OPENCODE_URL" ]] && download_rpm "opencode-desktop" "$OPENCODE_URL" "$RPM_DIR/opencode-desktop.rpm"
+
+sudo zypper install -y --allow-vendor-change \
+    python3-gobject python3-Pillow python3-psutil python3-requests \
+    libcanberra-gtk3-module vulkan-tools ImageMagick 2>/dev/null || true
+
+sudo pip3 install --break-system-packages -q vdf icoextract pygame 2>/dev/null || true
+
+FAUGUS_URL=$(curl -sf https://api.github.com/repos/Faugus/faugus-launcher/releases/latest \
+    | grep "browser_download_url.*noarch.rpm" | cut -d '"' -f 4 || true)
+
+if [[ -n "$FAUGUS_URL" ]]; then
+    FAUGUS_RPM="$RPM_DIR/faugus-launcher-standalone.rpm"
+    download_rpm "faugus-launcher" "$FAUGUS_URL" "$FAUGUS_RPM"
+    if [[ -f "$FAUGUS_RPM" ]]; then
+        sudo rpm -Uvh --nodeps --force "$FAUGUS_RPM" 2>/dev/null || true
+        rm -f "$FAUGUS_RPM"
+    fi
+fi
+
+shopt -s nullglob
+RPM_FILES=("$RPM_DIR"/*.rpm)
+if [[ ${#RPM_FILES[@]} -gt 0 ]]; then
+    sudo zypper install -y --allow-unsigned-rpm "${RPM_FILES[@]}" 2>/dev/null || true
+fi
+shopt -u nullglob
+rm -rf "$RPM_DIR"
 
 show_progress 7 $TOTAL_STEPS "$MSG_PHASE_2"
 
-mkdir -p "$DEB_DIR"
-download_deb() { wget -q --timeout=30 -O "$3" "$2" || rm -f "$3"; }
-get_github_deb_url() { curl -sfL "https://api.github.com/repos/${1}/releases/latest" | grep "browser_download_url.*${2}" | cut -d '"' -f 4 || true; }
+pkg_available() {
+    sudo zypper --non-interactive install --dry-run "$1" &>/dev/null
+}
 
-download_deb "Discord" "https://discord.com/api/download?platform=linux&format=deb" "$DEB_DIR/discord.deb"
-OPENCODE_URL=$(get_github_deb_url "anomalyco/opencode" "opencode-desktop-linux-amd64\\.deb")
-[[ -n "$OPENCODE_URL" ]] && download_deb "opencode-desktop" "$OPENCODE_URL" "$DEB_DIR/opencode-desktop.deb"
-LSFG_URL=$(get_github_deb_url "YuriSizov/ls-fg" "ls-fg_.*deb")
-LSFG_VK_URL=$(get_github_deb_url "YuriSizov/ls-fg-vk" "deb")
+QEMU_PKG=""
+for candidate in qemu-kvm qemu-x86 qemu; do
+    if pkg_available "$candidate"; then
+        QEMU_PKG="$candidate"
+        break
+    fi
+done
+[[ -z "$QEMU_PKG" ]] && QEMU_PKG="qemu-x86"
 
-[[ -n "$LSFG_URL" ]] && download_deb "ls-fg" "$LSFG_URL" "$DEB_DIR/lsfg.deb"
-[[ -n "$LSFG_VK_URL" ]] && download_deb "ls-fg-vk" "$LSFG_VK_URL" "$DEB_DIR/lsfg-vk.deb"
+OVMF_PKG=""
+for candidate in qemu-ovmf-x86_64 ovmf edk2-ovmf; do
+    if pkg_available "$candidate"; then
+        OVMF_PKG="$candidate"
+        break
+    fi
+done
 
-add_ppa_and_install "faugus/faugus-launcher" faugus-launcher || true
+VIRT_PACKAGES=(virt-manager "$QEMU_PKG" qemu-tools libvirt libvirt-daemon-qemu)
+[[ -n "$OVMF_PKG" ]] && VIRT_PACKAGES+=("$OVMF_PKG")
 
-shopt -s nullglob
-DEB_FILES=("$DEB_DIR"/*.deb)
-if [[ ${#DEB_FILES[@]} -gt 0 ]]; then
-    wait_for_apt
-    for deb in "${DEB_FILES[@]}"; do
-        sudo apt-get install -yq "$deb" || true
-    done
-fi
-shopt -u nullglob
-rm -rf "$DEB_DIR"
-
-# ==========================================================
-# 3. WIRTUALIZACJA, FIREWALL I ZSH
-# ==========================================================
-show_progress 8 $TOTAL_STEPS "$MSG_PHASE_3"
-
-wait_for_apt
-sudo apt-get install -yq virt-manager qemu-system qemu-utils libvirt-daemon-system libvirt-clients ovmf dnsmasq bluetooth bluez bluez-firmware bluez-tools ufw || true
+sudo zypper install -y --allow-vendor-change "${VIRT_PACKAGES[@]}" 2>/dev/null || true
 
 if command -v dconf &>/dev/null; then
-    dconf load /org/virt-manager/virt-manager/ <<'EOF'
+    dconf load /org/virt-manager/virt-manager/ <<'DCONFEOF'
 [/]
 manager-window-height=297
 manager-window-width=478
@@ -494,50 +471,69 @@ network-traffic=false
 [vms/2a91721fef6c4249997ea19b01801825]
 autoconnect=1
 vm-window-size=(1280, 842)
-EOF
+DCONFEOF
 else
     log_warn "Brak polecenia dconf – pomijam wczytanie ustawień virt-managera." "dconf command not found – skipping virt-manager settings import."
 fi
 
 for svc in libvirtd virtqemud; do
     if systemctl list-unit-files "${svc}.service" 2>/dev/null | grep -q "$svc"; then
-        sudo systemctl enable --now "${svc}.service" || true
+        sudo systemctl enable --now "${svc}.service" 2>/dev/null || true
         break
     fi
 done
 
 if ! sudo virsh net-info default &>/dev/null; then
-    sudo virsh net-define /usr/share/libvirt/networks/default.xml || true
+    sudo virsh net-define /usr/share/libvirt/networks/default.xml 2>/dev/null || true
 fi
 sudo virsh net-start default 2>/dev/null || true
-sudo virsh net-autostart default || true
+sudo virsh net-autostart default 2>/dev/null || true
 
-if command -v ufw &>/dev/null || [[ -x /usr/sbin/ufw ]]; then
-    [[ -f /etc/default/ufw ]] && sudo sed -i 's/^DEFAULT_FORWARD_POLICY=.*/DEFAULT_FORWARD_POLICY="ACCEPT"/' /etc/default/ufw || true
-    sudo ufw --force reset || true
-    sudo ufw default deny incoming || true
-    sudo ufw default allow outgoing || true
-    sudo ufw allow in  on virbr0 || true
-    sudo ufw allow out on virbr0 || true
-    sudo ufw allow from 192.168.122.0/24 || true
-    if dpkg -s openssh-server &>/dev/null || [[ -x /usr/sbin/sshd ]] || systemctl is-active --quiet ssh 2>/dev/null || systemctl is-active --quiet sshd 2>/dev/null; then
-        sudo ufw allow ssh || true
-    fi
-    sudo ufw --force enable || true
+if command -v firewall-cmd &>/dev/null; then
+    sudo systemctl enable --now firewalld 2>/dev/null || true
+    sudo firewall-cmd --permanent --zone=libvirt --add-interface=virbr0 2>/dev/null || true
+    sudo firewall-cmd --permanent --add-source=192.168.122.0/24 2>/dev/null || true
+    sudo firewall-cmd --reload 2>/dev/null || true
 fi
 
-for grp in libvirt libvirt-qemu kvm; do
-    getent group "$grp" &>/dev/null && sudo usermod -aG "$grp" "$CURRENT_USER" || true
+for grp in libvirt kvm; do
+    if getent group "$grp" &>/dev/null; then
+        sudo usermod -aG "$grp" "$CURRENT_USER" 2>/dev/null || true
+    fi
 done
 
+show_progress 8 $TOTAL_STEPS "$MSG_PHASE_2"
+
+sudo zypper install -y flatpak 2>/dev/null || true
+flatpak remote-add --if-not-exists flathub https://flathub.org/repo/flathub.flatpakrepo 2>/dev/null || true
+flatpak update --appstream 2>/dev/null || true
+
+flatpak install --user -y flathub com.github.tchx84.Flatseal 2>/dev/null || true
+flatpak install --user -y flathub it.mijorus.gearlever 2>/dev/null || true
+
+# ==========================================================
+#  ETAP 3/3: KONFIGURACJA USŁUG, BOOTLOADERA I ŚRODOWISKA
+# ==========================================================
 show_progress 9 $TOTAL_STEPS "$MSG_PHASE_3"
 
 sudo systemctl enable fstrim.timer || true
 sudo journalctl --vacuum-time=2d || true
-sudo sed -i 's/^GRUB_TIMEOUT=.*/GRUB_TIMEOUT=0/' /etc/default/grub || true
-sudo update-grub || true
 
 show_progress 10 $TOTAL_STEPS "$MSG_PHASE_3"
+
+LOADER_CONF="/boot/efi/loader/loader.conf"
+if sudo test -f "$LOADER_CONF"; then
+    if sudo grep -q "^#\?timeout" "$LOADER_CONF"; then
+        sudo sed -i -E 's/^#?[[:space:]]*timeout[[:space:]].*/timeout 0/' "$LOADER_CONF"
+    else
+        echo "timeout 0" | sudo tee -a "$LOADER_CONF" > /dev/null
+    fi
+    if command -v bootctl >/dev/null 2>&1; then
+        sudo bootctl set-timeout 0 || true
+    fi
+fi
+
+show_progress 11 $TOTAL_STEPS "$MSG_PHASE_3"
 
 sudo mkdir -p /etc/NetworkManager/conf.d
 echo -e "[main]\ndns=default\nrc-manager=symlink" | sudo tee /etc/NetworkManager/conf.d/dns.conf > /dev/null
@@ -545,40 +541,52 @@ echo -e "[global-dns]\n\n[global-dns-domain-*]\nservers=1.1.1.1,1.0.0.1,2606:470
 
 ACTIVE_CONN=$(nmcli -t -f NAME,DEVICE connection show --active 2>/dev/null | grep -v "^lo" | head -n 1 | cut -d: -f1 || true)
 if [[ -n "$ACTIVE_CONN" ]]; then
-    if sudo nmcli connection modify "$ACTIVE_CONN" ipv4.dns "1.1.1.1,1.0.0.1" ipv6.dns "2606:4700:4700::1112,2606:4700:4700::1002"; then
-        sudo nmcli connection up "$ACTIVE_CONN" || true
-        for i in {1..10}; do
-            getent hosts github.com &>/dev/null && break
-            sleep 1
-        done
-    fi
+    sudo nmcli connection modify "$ACTIVE_CONN" ipv4.dns "1.1.1.1,1.0.0.1" ipv6.dns "2606:4700:4700::1112,2606:4700:4700::1002"
+    sudo nmcli connection up "$ACTIVE_CONN" || true
 fi
 
-if command -v zsh &>/dev/null; then
-    sudo chsh -s /usr/bin/zsh "$CURRENT_USER" || true
+ZSH_BIN=$(command -v zsh || true)
+if [[ -z "$ZSH_BIN" ]]; then
+    sudo zypper install -y zsh && ZSH_BIN=$(command -v zsh || true)
+fi
+
+if [[ -n "$ZSH_BIN" ]]; then
+    sudo chsh -s "$ZSH_BIN" "$CURRENT_USER" || true
     if [[ ! -d "$HOME/.oh-my-zsh" ]]; then
         sh -c "$(curl -fsSL https://raw.githubusercontent.com/ohmyzsh/ohmyzsh/master/tools/install.sh)" "" --unattended || true
     fi
+
     P10K_DIR="${ZSH_CUSTOM:-$HOME/.oh-my-zsh/custom}/themes/powerlevel10k"
     if [[ ! -d "$P10K_DIR" ]]; then
         git clone --depth=1 https://github.com/romkatv/powerlevel10k.git "$P10K_DIR" || true
     fi
+
+    ZSH_CUSTOM_DIR="${ZSH_CUSTOM:-$HOME/.oh-my-zsh/custom}"
+    AUTOSUGGESTIONS_DIR="$ZSH_CUSTOM_DIR/plugins/zsh-autosuggestions"
+    if [[ ! -d "$AUTOSUGGESTIONS_DIR" ]]; then
+        git clone --depth=1 https://github.com/zsh-users/zsh-autosuggestions.git "$AUTOSUGGESTIONS_DIR" || true
+    fi
+    SYNTAX_HIGHLIGHT_DIR="$ZSH_CUSTOM_DIR/plugins/zsh-syntax-highlighting"
+    if [[ ! -d "$SYNTAX_HIGHLIGHT_DIR" ]]; then
+        git clone --depth=1 https://github.com/zsh-users/zsh-syntax-highlighting.git "$SYNTAX_HIGHLIGHT_DIR" || true
+    fi
+
     ZSHRC="$HOME/.zshrc"
     if [[ -f "$ZSHRC" ]]; then
         sed -i 's|^ZSH_THEME=.*|ZSH_THEME="powerlevel10k/powerlevel10k"|' "$ZSHRC" || true
-        sed -i 's/^plugins=(.*/plugins=(git sudo systemd debian)/' "$ZSHRC" || true
-        grep -q "LC_ALL=$SYSTEM_LOCALE" "$ZSHRC" || echo "export LC_ALL=$SYSTEM_LOCALE" >> "$ZSHRC"
-        grep -q "^fastfetch"         "$ZSHRC" || echo "fastfetch"                  >> "$ZSHRC"
-        grep -q "zsh-syntax-highlighting.zsh" "$ZSHRC" || echo "source /usr/share/zsh-syntax-highlighting/zsh-syntax-highlighting.zsh" >> "$ZSHRC"
-        grep -q "zsh-autosuggestions.zsh"     "$ZSHRC" || echo "source /usr/share/zsh-autosuggestions/zsh-autosuggestions.zsh"         >> "$ZSHRC"
+        sed -i 's/^plugins=(.*/plugins=(git sudo systemd suse zsh-autosuggestions zsh-syntax-highlighting)/' "$ZSHRC" || true
+        SHELL_LOCALE="${LANG:-${LC_ALL:-${LC_MESSAGES:-en_US.UTF-8}}}"
+        if command -v locale &>/dev/null; then
+            AVAILABLE_LOCALES="$(locale -a 2>/dev/null)"
+            if ! echo "$AVAILABLE_LOCALES" | grep -qiF "$SHELL_LOCALE" && ! echo "$AVAILABLE_LOCALES" | grep -qiF "$(echo "$SHELL_LOCALE" | sed 's/UTF-8/utf8/')"; then
+                SHELL_LOCALE="en_US.UTF-8"
+            fi
+        fi
+        grep -q "^export LC_ALL=" "$ZSHRC" || echo "export LC_ALL=${SHELL_LOCALE}" >> "$ZSHRC"
+        grep -q "^fastfetch"          "$ZSHRC" || echo "fastfetch"                  >> "$ZSHRC"
     fi
 fi
 
-show_progress 11 $TOTAL_STEPS "$MSG_PHASE_3"
-
-# ==========================================================
-# 4. ZAKOŃCZENIE I SPRZĄTANIE
-# ==========================================================
 if [[ "$USE_RUN0" -eq 1 ]]; then
     sudo rm -f "$RUN0_NOPASSWD_FILE"
     sudo systemctl try-restart polkit 2>/dev/null || true
@@ -586,7 +594,7 @@ else
     sudo rm -f /etc/sudoers.d/99-temp-installer
 fi
 
-show_progress 12 $TOTAL_STEPS "$MSG_PHASE_4"
+show_progress 12 $TOTAL_STEPS "$MSG_PHASE_3"
 echo -e "\n" >&3
 
 if [[ "$SCRIPT_LANG" == "pl" ]]; then
