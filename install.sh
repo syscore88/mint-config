@@ -429,7 +429,8 @@ download_deb "Discord" "https://discord.com/api/download?platform=linux&format=d
 OPENCODE_URL=$(get_github_deb_url "anomalyco/opencode" "opencode-desktop-linux-amd64\\.deb")
 [[ -n "$OPENCODE_URL" ]] && download_deb "opencode-desktop" "$OPENCODE_URL" "$DEB_DIR/opencode-desktop.deb"
 
-add_ppa_and_install "faugus/faugus-launcher" faugus-launcher || true
+HEROIC_URL=$(get_github_deb_url "Heroic-Games-Launcher/HeroicGamesLauncher" "amd64\\.deb")
+[[ -n "$HEROIC_URL" ]] && download_deb "Heroic Games Launcher" "$HEROIC_URL" "$DEB_DIR/heroic.deb"
 
 shopt -s nullglob
 DEB_FILES=("$DEB_DIR"/*.deb)
