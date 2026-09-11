@@ -429,8 +429,7 @@ download_deb "Discord" "https://discord.com/api/download?platform=linux&format=d
 OPENCODE_URL=$(get_github_deb_url "anomalyco/opencode" "opencode-desktop-linux-amd64\\.deb")
 [[ -n "$OPENCODE_URL" ]] && download_deb "opencode-desktop" "$OPENCODE_URL" "$DEB_DIR/opencode-desktop.deb"
 
-FAUGUS_URL=$(get_github_deb_url "Faugus/faugus-launcher" "all\\.deb")
-[[ -n "$FAUGUS_URL" ]] && download_deb "Faugus Launcher" "$FAUGUS_URL" "$DEB_DIR/faugus.deb"
+add_ppa_and_install "faugus/faugus-launcher" faugus-launcher || true
 
 shopt -s nullglob
 DEB_FILES=("$DEB_DIR"/*.deb)
