@@ -331,10 +331,13 @@ PACKAGES_INSTALL=(
     unrar-free mc btrfs-progs exfatprogs ntfs-3g os-prober llvm clang clang-tools clang-tidy
     adb fastboot fsarchiver inxi pv rsync p7zip-full makeself zenity innoextract needrestart flatpak timeshift
     python3-defusedxml python3-packaging python3-pip python3-tqdm mesa-common-dev
-    libayatana-appindicator3-1 gamemode vulkan-tools mangohud vkd3d-compiler goverlay winetricks
+    libayatana-appindicator3-1 gamemode vulkan-tools mangohud vkd3d-compiler winetricks
     gcc make cmake meson ninja-build cmake ninja-build pkg-config libvulkan-dev
     gstreamer1.0-plugins-good gstreamer1.0-plugins-bad gstreamer1.0-plugins-ugly
     zsh zsh-syntax-highlighting zsh-autosuggestions
+    qt6-qpa-plugins libqt6quick6 qml6-module-qtquick-controls qml6-module-qtquick-layouts
+    qml6-module-qtquick-window qml6-module-qtquick-dialogs qml6-module-qtqml-workerscript
+    qml6-module-qtquick-templates qml6-module-qt-labs-folderlistmodel
 )
 if ! sudo apt-get install -yq "${PACKAGES_INSTALL[@]}"; then
     FAILED_PACKAGES=()
@@ -441,6 +444,14 @@ if [[ ${#DEB_FILES[@]} -gt 0 ]]; then
 fi
 shopt -u nullglob
 rm -rf "$DEB_DIR"
+
+LSFG_TMP="$(mktemp -d)"
+LSFG_URL="$(curl -fsSL https://builds.lsfg-vk.dev/ | grep -oE 'https://[^"'"'"']+linux[^"'"'"']*\.tar\.xz' | head -n1 || true)"
+if [[ -n "$LSFG_URL" ]] && curl -fsSL -o "$LSFG_TMP/lsfg-vk.tar.xz" "$LSFG_URL"; then
+    mkdir -p "$HOME/.local"
+    tar -xf "$LSFG_TMP/lsfg-vk.tar.xz" -C "$HOME/.local" || true
+fi
+rm -rf "$LSFG_TMP"
 
 # ==========================================================
 # 3. WIRTUALIZACJA, FIREWALL I ZSH
