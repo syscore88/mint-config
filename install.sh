@@ -111,15 +111,15 @@ show_progress() {
 }
 
 if [[ "$SCRIPT_LANG" == "pl" ]]; then
-    MSG_PHASE_1="[1/4] Konfiguracja repozytoriów i optymalizacja systemu..."
-    MSG_PHASE_2="[2/4] Instalacja pakietów systemowych, Flatpak i .deb..."
-    MSG_PHASE_3="[3/4] Konfiguracja usług i środowiska ZSH..."
-    MSG_PHASE_4="[4/4] Zakończenie i sprzątanie..."
+    MSG_PHASE_1="[1/4] Przygotowywanie..."
+    MSG_PHASE_2="[2/4] Instalacja..."
+    MSG_PHASE_3="[3/4] Optymalizacja..."
+    MSG_PHASE_4="[4/4] Finalizowanie..."
 else
-    MSG_PHASE_1="[1/4] Repository configuration and system optimization..."
-    MSG_PHASE_2="[2/4] Installing system packages, Flatpak, and .deb..."
-    MSG_PHASE_3="[3/4] Configuring services and ZSH environment..."
-    MSG_PHASE_4="[4/4] Finishing up and cleaning..."
+    MSG_PHASE_1="[1/4] Preparing..."
+    MSG_PHASE_2="[2/4] Installing..."
+    MSG_PHASE_3="[3/4] Optimizing..."
+    MSG_PHASE_4="[4/4] Finalizing..."
 fi
 
 TOTAL_STEPS=12
@@ -249,7 +249,7 @@ add_ppa_and_install() {
 }
 
 # ==========================================================
-# 1. PRZYGOTOWANIE I REPOZYTORIA
+# ETAP 1/4: PRZYGOTOWYWANIE
 # ==========================================================
 show_progress 0 $TOTAL_STEPS "$MSG_PHASE_1"
 
@@ -346,7 +346,7 @@ fi
 sudo apt-get autoremove -yq || true
 
 # ==========================================================
-# 2. INSTALACJA PAKIETÓW I FLATPAK
+# ETAP 2/4: INSTALACJA
 # ==========================================================
 show_progress 4 $TOTAL_STEPS "$MSG_PHASE_2"
 
@@ -481,7 +481,7 @@ fi
 rm -rf "$LSFG_TMP"
 
 # ==========================================================
-# 3. WIRTUALIZACJA, FIREWALL I ZSH
+# ETAP 3/4: OPTYMALIZACJA
 # ==========================================================
 show_progress 8 $TOTAL_STEPS "$MSG_PHASE_3"
 
@@ -593,7 +593,7 @@ fi
 show_progress 11 $TOTAL_STEPS "$MSG_PHASE_3"
 
 # ==========================================================
-# 4. ZAKOŃCZENIE I SPRZĄTANIE
+# ETAP 4/4: CZYSZCZENIE
 # ==========================================================
 if [[ "$USE_RUN0" -eq 1 ]]; then
     sudo rm -f "$RUN0_NOPASSWD_FILE"
