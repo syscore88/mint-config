@@ -365,6 +365,7 @@ PACKAGES_INSTALL=(
     qml6-module-qtquick-window qml6-module-qtquick-dialogs qml6-module-qtqml-workerscript
     qml6-module-qtquick-templates qml6-module-qt-labs-folderlistmodel
 )
+
 if ! sudo apt-get install -yq "${PACKAGES_INSTALL[@]}"; then
     for pkg in "${PACKAGES_INSTALL[@]}"; do
         # shellcheck disable=SC2024 # redirect target is in /tmp, writable by the invoking user; sudo only needs to elevate apt-get
