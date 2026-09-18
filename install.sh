@@ -7,7 +7,7 @@ set -Eeuo pipefail
 export DEBIAN_FRONTEND=noninteractive
 export PATH="/usr/sbin:/sbin:$PATH"
 
-detect_system_lang() { 
+detect_system_lang() {
     local sys_lang="${LANG:-}"
     [[ -z "$sys_lang" ]] && sys_lang="${LC_ALL:-${LC_MESSAGES:-}}"
     if [[ "$sys_lang" == pl_PL* || "$sys_lang" == pl* ]]; then
@@ -50,7 +50,10 @@ exec >>"$TMP_LOG" 2>&1
 
 cleanup_on_exit() {
     local exit_code=$?
+    [[ -n "${RUN0_NOPASSWD_FILE:-}" && -f "$RUN0_NOPASSWD_FILE" ]] && { sudo rm -f "$RUN0_NOPASSWD_FILE"; sudo systemctl try-restart polkit 2>/dev/null || true; }
+    [[ -f /etc/sudoers.d/99-temp-installer ]] && sudo rm -f /etc/sudoers.d/99-temp-installer
     declare -F restore_packagekit >/dev/null && restore_packagekit || true
+    [ -n "${SUDO_KEEPALIVE_PID:-}" ] && kill "$SUDO_KEEPALIVE_PID" 2>/dev/null || true
     printf '\033[?7h' >&3
     if [ "$exit_code" -ne 0 ] || [ "${#FAILED_PACKAGES[@]}" -gt 0 ]; then
         echo -e "\n" >&3
@@ -155,32 +158,25 @@ if [[ "$SCRIPT_LANG" == "pl" ]]; then
 else
     printf 'sudo password required:\n' >&3
 fi
-read -rs SUDO_PASS < /dev/tty
-printf '\n' >&3
-if ! printf '%s\n' "$SUDO_PASS" | sudo -S -p '' -v 2>/dev/null; then
-    unset SUDO_PASS
-    if [[ "$SCRIPT_LANG" == "pl" ]]; then
-        echo -e "${ERR}✘ Nieprawidłowe hasło sudo. Jeśli konto root ma osobne hasło, dodaj 'Defaults targetpw' w /etc/sudoers i podaj hasło roota.${NC}" >&3
-    else
-        echo -e "${ERR}✘ Incorrect sudo password. If root has a separate password, add 'Defaults targetpw' to /etc/sudoers and enter the root password.${NC}" >&3
-    fi
-    exit 1
-fi
+sudo -v
+( while true; do sudo -n true; sleep 60; kill -0 "$$" 2>/dev/null || exit; done ) &
+SUDO_KEEPALIVE_PID=$!
 
 if [[ "$USE_RUN0" -eq 1 ]]; then
-    printf '%s\n' "$SUDO_PASS" | sudo -S -p '' tee "$RUN0_NOPASSWD_FILE" > /dev/null <<EOF
+    sudo tee "$RUN0_NOPASSWD_FILE" > /dev/null << EOF
 polkit.addRule(function(action, subject) {
-    if (subject.user == "$CURRENT_USER") {
+    if (action.id == "org.freedesktop.systemd1.manage-units" &&
+        subject.user == "$CURRENT_USER") {
         return polkit.Result.YES;
     }
 });
 EOF
-    printf '%s\n' "$SUDO_PASS" | sudo -S -p '' systemctl try-restart polkit 2>/dev/null || true
+    sudo systemctl try-restart polkit 2>/dev/null || true
 else
     SUDOERS_TMP="$(mktemp)"
     echo "$CURRENT_USER ALL=(ALL) NOPASSWD: ALL" > "$SUDOERS_TMP"
-    if printf '%s\n' "$SUDO_PASS" | sudo -S -p '' visudo -cf "$SUDOERS_TMP" &>/dev/null; then
-        printf '%s\n' "$SUDO_PASS" | sudo -S -p '' install -m 0440 -o root -g root "$SUDOERS_TMP" /etc/sudoers.d/99-temp-installer
+    if sudo visudo -cf "$SUDOERS_TMP" &>/dev/null; then
+        sudo install -m 0440 -o root -g root "$SUDOERS_TMP" /etc/sudoers.d/99-temp-installer
     else
         rm -f "$SUDOERS_TMP"
         if [[ "$SCRIPT_LANG" == "pl" ]]; then
@@ -191,15 +187,6 @@ else
         exit 1
     fi
     rm -f "$SUDOERS_TMP"
-fi
-unset SUDO_PASS
-if ! sudo -n true 2>/dev/null; then
-    if [[ "$SCRIPT_LANG" == "pl" ]]; then
-        echo -e "${ERR}✘ Nie udało się skonfigurować uprawnień bezhasłowych sudo - przerywam.${NC}" >&3
-    else
-        echo -e "${ERR}✘ Failed to configure passwordless sudo - aborting.${NC}" >&3
-    fi
-    exit 1
 fi
 
 printf '\033[?7l' >&3
@@ -256,12 +243,15 @@ disable_packagekit() {
     fi
     sudo systemctl mask "${PACKAGEKIT_UNITS[@]}" 2>/dev/null || true
     PACKAGEKIT_MASKED=1
+    log_info "PackageKit zatrzymany i zamaskowany na czas instalacji." \
+             "PackageKit stopped and masked for the duration of the installation."
 }
 
 restore_packagekit() {
     [[ "${PACKAGEKIT_MASKED:-0}" -eq 1 ]] || return 0
     sudo systemctl unmask "${PACKAGEKIT_UNITS[@]}" 2>/dev/null || true
     PACKAGEKIT_MASKED=0
+    log_info "PackageKit odmaskowany." "PackageKit unmasked."
 }
 
 _pkg_lock_busy() {
@@ -421,7 +411,7 @@ PACKAGES_INSTALL=(
     adb fastboot fsarchiver inxi pv rsync p7zip-full makeself zenity innoextract needrestart flatpak timeshift
     python3-defusedxml python3-packaging python3-pip python3-tqdm mesa-common-dev
     libayatana-appindicator3-1 gamemode vulkan-tools mangohud vkd3d-compiler winetricks
-    gcc make cmake meson ninja-build pkg-config libvulkan-dev
+    gcc make cmake meson ninja-build cmake ninja-build pkg-config libvulkan-dev
     gstreamer1.0-plugins-good gstreamer1.0-plugins-bad gstreamer1.0-plugins-ugly
     zsh zsh-syntax-highlighting zsh-autosuggestions
     qt6-qpa-plugins libqt6quick6 qml6-module-qtquick-controls qml6-module-qtquick-layouts
@@ -534,30 +524,21 @@ fi
 shopt -u nullglob
 rm -rf "$DEB_DIR"
 
-wait_for_apt
-sudo apt-get install -yq \
-    curl \
-    qt6-base-dev qt6-base-dev-tools \
-    qt6-tools-dev qt6-tools-dev-tools \
-    qt6-declarative-dev qt6-declarative-dev-tools || true
-
-LSFG_SRC_DIR="$(mktemp -d)"
-if git clone --depth=1 https://git.lsfg-vk.dev/lsfg-vk.git "$LSFG_SRC_DIR/lsfg-vk"; then
-    (
-        cd "$LSFG_SRC_DIR/lsfg-vk"
-        cmake -B build -G Ninja \
-            -DCMAKE_BUILD_TYPE=Release \
-            -DCMAKE_INTERPROCEDURAL_OPTIMIZATION=ON \
-            -DCMAKE_INSTALL_PREFIX=/usr/local \
-            -DCMAKE_CXX_COMPILER=clang++ \
-            -DLSFGVK_BUILD_UI=ON
-        cmake --build build
-        sudo cmake --install build
-    ) || log_warn "Nie udało się zbudować lsfg-vk ze źródeł." "Failed to build lsfg-vk from source."
-else
-    log_warn "Nie udało się sklonować repozytorium lsfg-vk." "Failed to clone the lsfg-vk repository."
+LSFG_TMP="$(mktemp -d)"
+LSFG_UA="Mozilla/5.0 (X11; Linux x86_64; rv:128.0) Gecko/20100101 Firefox/128.0"
+LSFG_HTML="$(curl -fsSL -A "$LSFG_UA" -e "https://builds.lsfg-vk.dev/" "https://builds.lsfg-vk.dev/" 2>/dev/null || true)"
+LSFG_URL="$(printf '%s' "$LSFG_HTML" | grep -oiE 'https?://[^"'"'"'<>[:space:]]+\.tar\.xz' | grep -i linux | head -n1 || true)"
+if [[ -z "$LSFG_URL" ]]; then
+    LSFG_URL="$(printf '%s' "$LSFG_HTML" | grep -oiE 'https?://[^"'"'"'<>[:space:]]+\.tar\.xz' | head -n1 || true)"
 fi
-rm -rf "$LSFG_SRC_DIR"
+if [[ -n "$LSFG_URL" ]] && curl -fsSL -A "$LSFG_UA" -o "$LSFG_TMP/lsfg-vk.tar.xz" "$LSFG_URL" 2>/dev/null && tar -tf "$LSFG_TMP/lsfg-vk.tar.xz" &>/dev/null; then
+    mkdir -p "$HOME/.local"
+    tar -xf "$LSFG_TMP/lsfg-vk.tar.xz" -C "$HOME/.local"
+    echo "lsfg-vk zainstalowano z $LSFG_URL"
+else
+    echo "lsfg-vk: nie udalo sie pobrac paczki z builds.lsfg-vk.dev, pomijam" >&2
+fi
+rm -rf "$LSFG_TMP"
 
 # ==========================================================
 # ETAP 3/4: OPTYMALIZACJA
@@ -676,12 +657,6 @@ show_progress 11 $TOTAL_STEPS "$MSG_PHASE_3"
 # ==========================================================
 # ETAP 4/4: CZYSZCZENIE
 # ==========================================================
-if [[ "$USE_RUN0" -eq 1 ]]; then
-    sudo rm -f "$RUN0_NOPASSWD_FILE"
-    sudo systemctl try-restart polkit 2>/dev/null || true
-else
-    sudo rm -f /etc/sudoers.d/99-temp-installer
-fi
 
 show_progress 12 $TOTAL_STEPS "$MSG_PHASE_4"
 echo -e "\n" >&3
