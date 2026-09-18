@@ -406,7 +406,7 @@ PACKAGES_INSTALL=(
     adb fastboot fsarchiver inxi pv rsync p7zip-full makeself zenity innoextract needrestart flatpak timeshift
     python3-defusedxml python3-packaging python3-pip python3-tqdm mesa-common-dev
     libayatana-appindicator3-1 gamemode vulkan-tools mangohud vkd3d-compiler winetricks
-    gcc make cmake meson ninja-build cmake ninja-build pkg-config libvulkan-dev
+    gcc make cmake meson ninja-build pkg-config libvulkan-dev
     gstreamer1.0-plugins-good gstreamer1.0-plugins-bad gstreamer1.0-plugins-ugly
     zsh zsh-syntax-highlighting zsh-autosuggestions
     qt6-qpa-plugins libqt6quick6 qml6-module-qtquick-controls qml6-module-qtquick-layouts
@@ -416,7 +416,6 @@ PACKAGES_INSTALL=(
 
 if ! sudo apt-get install -yq "${PACKAGES_INSTALL[@]}"; then
     for pkg in "${PACKAGES_INSTALL[@]}"; do
-        # shellcheck disable=SC2024 # redirect target is in /tmp, writable by the invoking user; sudo only needs to elevate apt-get
         if ! sudo apt-get install -yq "$pkg" > /tmp/install-"$pkg".log 2>&1; then
             FAILED_PACKAGES+=("$pkg")
         fi
@@ -520,13 +519,30 @@ fi
 shopt -u nullglob
 rm -rf "$DEB_DIR"
 
-LSFG_TMP="$(mktemp -d)"
-LSFG_URL="$(curl -fsSL https://builds.lsfg-vk.dev/ | grep -oE 'https://[^"'"'"']+linux[^"'"'"']*\.tar\.xz' | head -n1 || true)"
-if [[ -n "$LSFG_URL" ]] && curl -fsSL -o "$LSFG_TMP/lsfg-vk.tar.xz" "$LSFG_URL"; then
-    mkdir -p "$HOME/.local"
-    tar -xf "$LSFG_TMP/lsfg-vk.tar.xz" -C "$HOME/.local" || true
+wait_for_apt
+sudo apt-get install -yq \
+    curl \
+    qt6-base-dev qt6-base-dev-tools \
+    qt6-tools-dev qt6-tools-dev-tools \
+    qt6-declarative-dev qt6-declarative-dev-tools || true
+
+LSFG_SRC_DIR="$(mktemp -d)"
+if git clone --depth=1 https://git.lsfg-vk.dev/lsfg-vk.git "$LSFG_SRC_DIR/lsfg-vk"; then
+    (
+        cd "$LSFG_SRC_DIR/lsfg-vk"
+        cmake -B build -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_INTERPROCEDURAL_OPTIMIZATION=ON \
+            -DCMAKE_INSTALL_PREFIX=/usr/local \
+            -DCMAKE_CXX_COMPILER=clang++ \
+            -DLSFGVK_BUILD_UI=ON
+        cmake --build build
+        sudo cmake --install build
+    ) || log_warn "Nie udało się zbudować lsfg-vk ze źródeł." "Failed to build lsfg-vk from source."
+else
+    log_warn "Nie udało się sklonować repozytorium lsfg-vk." "Failed to clone the lsfg-vk repository."
 fi
-rm -rf "$LSFG_TMP"
+rm -rf "$LSFG_SRC_DIR"
 
 # ==========================================================
 # ETAP 3/4: OPTYMALIZACJA
