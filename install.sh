@@ -439,7 +439,7 @@ show_progress 4 $TOTAL_STEPS "$MSG_PHASE_2"
 
 wait_for_apt
 PACKAGES_INSTALL=(
-    google-chrome-stable brave-origin gmic mixxx kdenlive gimp soundconverter
+    google-chrome-stable brave-origin gmic gimp-gmic mixxx kdenlive gimp soundconverter
     vim dconf-editor hunspell-pl bleachbit profile-sync-daemon git build-essential
     unrar-free mc btrfs-progs exfatprogs ntfs-3g os-prober llvm clang clang-tools clang-tidy
     adb fastboot fsarchiver inxi pv rsync p7zip-full makeself zenity innoextract needrestart flatpak timeshift
@@ -670,6 +670,7 @@ show_progress 9 $TOTAL_STEPS "$MSG_PHASE_3"
 sudo systemctl enable fstrim.timer || true
 sudo journalctl --vacuum-time=2d || true
 sudo sed -i 's/^GRUB_TIMEOUT=.*/GRUB_TIMEOUT=0/' /etc/default/grub || true
+grep -q 'mitigations=off' /etc/default/grub || sudo sed -i 's/^\(GRUB_CMDLINE_LINUX_DEFAULT="[^"]*\)"/\1 mitigations=off"/' /etc/default/grub || true
 sudo update-grub || true
 
 show_progress 10 $TOTAL_STEPS "$MSG_PHASE_3"
