@@ -441,7 +441,7 @@ show_progress 4 $TOTAL_STEPS "$MSG_PHASE_2"
 
 wait_for_apt
 PACKAGES_INSTALL=(
-    google-chrome-stable brave-origin gmic gimp-gmic mixxx kdenlive gimp soundconverter
+    google-chrome-stable brave-origin krita mixxx kdenlive gimp soundconverter
     vim dconf-editor hunspell-pl bleachbit profile-sync-daemon git build-essential
     unrar-free mc btrfs-progs exfatprogs ntfs-3g os-prober llvm clang clang-tools clang-tidy
     adb fastboot fsarchiver inxi pv rsync p7zip-full makeself zenity innoextract needrestart flatpak timeshift
