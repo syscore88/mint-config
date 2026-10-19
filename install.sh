@@ -673,6 +673,7 @@ sudo systemctl enable fstrim.timer || true
 sudo journalctl --vacuum-time=2d || true
 sudo sed -i 's/^GRUB_TIMEOUT=.*/GRUB_TIMEOUT=0/' /etc/default/grub || true
 grep -q 'mitigations=off' /etc/default/grub || sudo sed -i 's/^\(GRUB_CMDLINE_LINUX_DEFAULT="[^"]*\)"/\1 mitigations=off"/' /etc/default/grub || true
+grep -q 'split_lock_detect=off' /etc/default/grub || sudo sed -i 's/^\(GRUB_CMDLINE_LINUX_DEFAULT="[^"]*\)"/\1 split_lock_detect=off"/' /etc/default/grub || true
 sudo update-grub || true
 
 show_progress 10 $TOTAL_STEPS "$MSG_PHASE_3"
