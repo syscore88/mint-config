@@ -450,7 +450,7 @@ PACKAGES_INSTALL=(
     libayatana-appindicator3-1 gamemode vulkan-tools mangohud vkd3d-compiler winetricks
     gcc g++ make cmake meson ninja-build cmake ninja-build pkg-config libvulkan-dev
     libgl1-mesa-dev qt6-tools-dev ghostwriter gnome-disk-utility zram-tools
-    gstreamer1.0-plugins-good gstreamer1.0-plugins-bad gstreamer1.0-plugins-ugly
+    gstreamer1.0-plugins-good gstreamer1.0-plugins-bad gstreamer1.0-plugins-ugly mint-meta-codecs ffmpeg x264 gstreamer1.0-libav
     zsh zsh-syntax-highlighting zsh-autosuggestions
     qt6-qpa-plugins libqt6quick6 qml6-module-qtquick-controls qml6-module-qtquick-layouts
     qml6-module-qtquick-window qml6-module-qtquick-dialogs qml6-module-qtqml-workerscript
