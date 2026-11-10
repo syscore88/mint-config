@@ -297,19 +297,64 @@ pkg_installed() {
     [[ "$(dpkg-query -W -f='${db:Status-Abbrev}' "$1" 2>/dev/null)" == ii* ]]
 }
 
+pkg_available() {
+    local cand
+    cand="$(apt-cache policy "$1" 2>/dev/null | awk '/Candidate:/ {print $2; exit}')"
+    [[ -n "$cand" && "$cand" != "(none)" ]]
+}
+
+mark_failed() {
+    local p f
+    for p in "$@"; do
+        for f in "${FAILED_PACKAGES[@]}"; do
+            [[ "$f" == "$p" ]] && continue 2
+        done
+        FAILED_PACKAGES+=("$p")
+    done
+}
+
+forget_failed() {
+    local -a keep=()
+    local f p drop
+    for f in "${FAILED_PACKAGES[@]}"; do
+        drop=0
+        for p in "$@"; do
+            [[ "$f" == "$p" ]] && drop=1
+        done
+        [[ "$drop" -eq 0 ]] && keep+=("$f")
+    done
+    FAILED_PACKAGES=("${keep[@]}")
+}
+
+# Pakiety bez kandydata w repozytorium są pomijane (jak w arch.sh) i trafiają
+# do FAILED_PACKAGES - komunikat wyświetla się na końcu skryptu.
 install_missing() {
-    local -a opts=() missing=()
-    local arg
+    local -a opts=() valid=()
+    local arg p rc=0
     for arg in "$@"; do
         if [[ "$arg" == -* ]]; then
             opts+=("$arg")
-        elif ! pkg_installed "$arg"; then
-            missing+=("$arg")
+        elif pkg_installed "$arg"; then
+            continue
+        elif pkg_available "$arg"; then
+            valid+=("$arg")
+        else
+            mark_failed "$arg"
+            rc=1
         fi
     done
-    if (( ${#missing[@]} > 0 )); then
-        sudo apt-get install "${opts[@]}" "${missing[@]}"
+    if (( ${#valid[@]} > 0 )); then
+        if ! sudo apt-get install "${opts[@]}" "${valid[@]}"; then
+            for p in "${valid[@]}"; do
+                pkg_installed "$p" && continue
+                if ! sudo apt-get install "${opts[@]}" "$p"; then
+                    mark_failed "$p"
+                    rc=1
+                fi
+            done
+        fi
     fi
+    return "$rc"
 }
 
 disable_packagekit
@@ -332,6 +377,7 @@ add_ppa_and_install() {
         return 0
     fi
 
+    forget_failed "${packages[@]}"
     sudo add-apt-repository --remove -y "ppa:$ppa" 2>/dev/null || true
     wait_for_apt
     sudo apt-get update -yq || true
@@ -457,13 +503,7 @@ PACKAGES_INSTALL=(
     qml6-module-qtquick-templates qml6-module-qt-labs-folderlistmodel
 )
 
-if ! install_missing -yq "${PACKAGES_INSTALL[@]}"; then
-    for pkg in "${PACKAGES_INSTALL[@]}"; do
-        if ! install_missing -yq "$pkg" > /tmp/install-"$pkg".log 2>&1; then
-            FAILED_PACKAGES+=("$pkg")
-        fi
-    done
-fi
+install_missing -yq "${PACKAGES_INSTALL[@]}" || true
 
 show_progress 5 $TOTAL_STEPS "$MSG_PHASE_2"
 
@@ -517,7 +557,22 @@ echo "$VGA_INFO" | grep -iq "Intel"  && HAS_INTEL=1
 wait_for_apt
 
 if [[ "$HAS_AMD" -eq 1 || "$HAS_INTEL" -eq 1 || ( "$HAS_NVIDIA" -eq 0 && "$HAS_AMD" -eq 0 && "$HAS_INTEL" -eq 0 ) ]]; then
-    install_missing -yq libgl1-mesa-dri:i386 mesa-vulkan-drivers:i386 || true
+    install_missing -yq libgl1-mesa-dri:amd64 libgl1-mesa-dri:i386 mesa-vulkan-drivers:amd64 mesa-vulkan-drivers:i386 libglx-mesa0:amd64 libglx-mesa0:i386 || true
+fi
+if [[ "$HAS_AMD" -eq 1 ]]; then
+    install_missing -yq mesa-va-drivers:amd64 || true
+    install_missing -yq mesa-va-drivers:i386 || true
+    install_missing -yq mesa-opencl-icd:amd64 || true
+    install_missing -yq mesa-opencl-icd:i386 || true
+fi
+if [[ "$HAS_INTEL" -eq 1 ]]; then
+    install_missing -yq intel-media-va-driver-non-free:amd64 || true
+    install_missing -yq intel-media-va-driver-non-free:i386 || true
+    install_missing -yq intel-opencl-icd || true
+fi
+if [[ "$HAS_NVIDIA" -eq 0 && "$HAS_AMD" -eq 0 && "$HAS_INTEL" -eq 0 ]]; then
+    install_missing -yq mesa-opencl-icd:amd64 || true
+    install_missing -yq mesa-opencl-icd:i386 || true
 fi
 [[ "$HAS_AMD" -eq 1 ]]   && add_module "amdgpu"
 [[ "$HAS_INTEL" -eq 1 ]] && add_module "i915"
@@ -526,7 +581,11 @@ if [[ "$HAS_NVIDIA" -eq 1 ]]; then
     NVIDIA_BRANCH=$(dpkg -l 2>/dev/null | grep -oP '^ii\s+nvidia-driver-\K[0-9]+' | sort -un | tail -1)
     if [[ -n "$NVIDIA_BRANCH" ]]; then
         install_missing -yq "libnvidia-gl-${NVIDIA_BRANCH}:i386" || true
+        install_missing -yq "libnvidia-compute-${NVIDIA_BRANCH}:amd64" || true
+        install_missing -yq "libnvidia-compute-${NVIDIA_BRANCH}:i386" || true
     fi
+    install_missing -yq nvidia-vaapi-driver:amd64 || true
+    install_missing -yq nvidia-vaapi-driver:i386 || true
     add_module "nvidia"
     add_module "nvidia_modeset"
     add_module "nvidia_uvm"
