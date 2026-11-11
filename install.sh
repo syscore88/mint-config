@@ -206,42 +206,6 @@ fi
 
 printf '\033[?7l' >&3
 
-safe_apt_update() {
-    local out rc
-    set +e
-    out=$(sudo apt-get update -yq 2>&1)
-    rc=$?
-    set -e
-    echo "$out"
-    [[ $rc -eq 0 ]] && return 0
-
-    local broken_urls
-    broken_urls=$(echo "$out" | grep -oP '(?:Błąd|Err|Fehler|Erreur|Errore|Erro):[0-9]+ \Khttps?://\S+')
-    broken_urls+=$'\n'"$(echo "$out" | grep -oP '^\S+:[0-9]+ \Khttps?://\S+(?= )')"
-    broken_urls=$(echo "$broken_urls" | sort -u | grep -v '^$' || true)
-    local removed=0
-    while IFS= read -r url; do
-        [[ -z "$url" ]] && continue
-        local host_path="${url#http://}"
-        host_path="${host_path#https://}"
-        for f in /etc/apt/sources.list.d/*.list /etc/apt/sources.list.d/*.sources; do
-            [[ -f "$f" ]] || continue
-            if grep -qF "$host_path" "$f" 2>/dev/null; then
-                sudo rm -f "$f"
-                removed=1
-            fi
-        done
-    done <<< "$broken_urls"
-
-    if [[ $removed -eq 1 ]]; then
-        wait_for_apt
-        sudo apt-get update -yq || true
-        return 0
-    else
-        return 0
-    fi
-}
-
 # ==========================================================
 # PACKAGEKIT + BLOKADA MENEDŻERA PAKIETÓW
 # ==========================================================
@@ -297,12 +261,6 @@ pkg_installed() {
     [[ "$(dpkg-query -W -f='${db:Status-Abbrev}' "$1" 2>/dev/null)" == ii* ]]
 }
 
-pkg_available() {
-    local cand
-    cand="$(apt-cache policy "$1" 2>/dev/null | awk '/Candidate:/ {print $2; exit}')"
-    [[ -n "$cand" && "$cand" != "(none)" ]]
-}
-
 mark_failed() {
     local p f
     for p in "$@"; do
@@ -313,19 +271,6 @@ mark_failed() {
     done
 }
 
-forget_failed() {
-    local -a keep=()
-    local f p drop
-    for f in "${FAILED_PACKAGES[@]}"; do
-        drop=0
-        for p in "$@"; do
-            [[ "$f" == "$p" ]] && drop=1
-        done
-        [[ "$drop" -eq 0 ]] && keep+=("$f")
-    done
-    FAILED_PACKAGES=("${keep[@]}")
-}
-
 install_missing() {
     local -a opts=() valid=()
     local arg p rc=0
@@ -334,11 +279,8 @@ install_missing() {
             opts+=("$arg")
         elif pkg_installed "$arg"; then
             continue
-        elif pkg_available "$arg"; then
-            valid+=("$arg")
         else
-            mark_failed "$arg"
-            rc=1
+            valid+=("$arg")
         fi
     done
     if (( ${#valid[@]} > 0 )); then
@@ -367,15 +309,16 @@ add_ppa_and_install() {
     done
     [[ "$all_installed" -eq 1 ]] && return 0
 
-    if ! command -v add-apt-repository &>/dev/null; then return 1; fi
-    if ! sudo add-apt-repository -y "ppa:$ppa" 2>/dev/null; then return 1; fi
+    if ! command -v add-apt-repository &>/dev/null; then mark_failed "${packages[@]}"; return 1; fi
+    if ! sudo add-apt-repository -y "ppa:$ppa" 2>/dev/null; then mark_failed "${packages[@]}"; return 1; fi
 
     wait_for_apt
-    if sudo apt-get update -yq && install_missing -yq "${packages[@]}"; then
+    sudo apt-get update -yq || true
+    if install_missing -yq "${packages[@]}"; then
         return 0
     fi
 
-    forget_failed "${packages[@]}"
+    mark_failed "${packages[@]}"
     sudo add-apt-repository --remove -y "ppa:$ppa" 2>/dev/null || true
     wait_for_apt
     sudo apt-get update -yq || true
@@ -414,7 +357,7 @@ fi
 show_progress 1 $TOTAL_STEPS "$MSG_PHASE_1"
 
 wait_for_apt
-safe_apt_update
+sudo apt-get update -yq || true
 for pkg in curl wget gnupg pciutils dconf-cli; do
     install_missing -yq "$pkg" || true
 done
@@ -427,7 +370,7 @@ GPU_VENDORS=()
 GPU_UNKNOWN_PKGS=(
     libgl1-mesa-dri:amd64 libgl1-mesa-dri:i386
     mesa-vulkan-drivers:amd64 mesa-vulkan-drivers:i386
-    libglx-mesa0:amd64 libglx-mesa0:i386 mesa-opencl-icd:amd64 mesa-opencl-icd:i386
+    libglx-mesa0:amd64 libglx-mesa0:i386 mesa-opencl-icd:amd64
     vulkan-tools libvulkan-dev libgl1-mesa-dev mesa-common-dev
 )
 if command -v lspci &>/dev/null; then
@@ -470,22 +413,13 @@ sudo mkdir -p /usr/share/keyrings
 sudo rm -f /usr/share/keyrings/brave-browser-archive-keyring.gpg
 BRAVE_KEY_ID="0686B78420038257"
 BRAVE_GNUPGHOME="$(mktemp -d)"
-BRAVE_KEY_OK=0
-if gpg --homedir "$BRAVE_GNUPGHOME" --keyserver hkps://keyserver.ubuntu.com --recv-keys "$BRAVE_KEY_ID" \
-    || gpg --homedir "$BRAVE_GNUPGHOME" --keyserver hkps://keys.openpgp.org --recv-keys "$BRAVE_KEY_ID"; then
-    if gpg --homedir "$BRAVE_GNUPGHOME" --export "$BRAVE_KEY_ID" | sudo tee /usr/share/keyrings/brave-browser-archive-keyring.gpg > /dev/null \
-        && [[ -s /usr/share/keyrings/brave-browser-archive-keyring.gpg ]]; then
-        BRAVE_KEY_OK=1
-    fi
+if ! gpg --homedir "$BRAVE_GNUPGHOME" --keyserver hkps://keyserver.ubuntu.com --recv-keys "$BRAVE_KEY_ID"; then
+    gpg --homedir "$BRAVE_GNUPGHOME" --keyserver hkps://keys.openpgp.org --recv-keys "$BRAVE_KEY_ID" || true
 fi
+gpg --homedir "$BRAVE_GNUPGHOME" --export "$BRAVE_KEY_ID" | sudo tee /usr/share/keyrings/brave-browser-archive-keyring.gpg > /dev/null
 rm -rf "$BRAVE_GNUPGHOME"
-
-if [[ "$BRAVE_KEY_OK" -eq 1 ]]; then
-    sudo chmod 644 /usr/share/keyrings/brave-browser-archive-keyring.gpg
-    sudo curl -fsSLo /etc/apt/sources.list.d/brave-browser-release.sources https://brave-browser-apt-release.s3.brave.com/brave-browser.sources || true
-else
-    sudo rm -f /usr/share/keyrings/brave-browser-archive-keyring.gpg
-fi
+sudo chmod 644 /usr/share/keyrings/brave-browser-archive-keyring.gpg
+sudo curl -fsSLo /etc/apt/sources.list.d/brave-browser-release.sources https://brave-browser-apt-release.s3.brave.com/brave-browser.sources
 
 sudo mkdir -p /etc/NetworkManager/conf.d
 echo -e "[main]\ndns=default\nrc-manager=symlink" | sudo tee /etc/NetworkManager/conf.d/dns.conf > /dev/null
@@ -498,7 +432,7 @@ if [[ -n "$ACTIVE_CONN" ]]; then
 fi
 
 wait_for_apt
-safe_apt_update
+sudo apt-get update -yq || true
 sudo apt-get upgrade -yq || true
 
 show_progress 3 $TOTAL_STEPS "$MSG_PHASE_1"
@@ -526,7 +460,7 @@ SYSTEM_PKGS=(
     google-chrome-stable brave-origin krita mixxx kdenlive gimp soundconverter
     vim dconf-editor hunspell-pl bleachbit profile-sync-daemon git build-essential
     unrar-free mc btrfs-progs exfatprogs ntfs-3g os-prober llvm clang clang-tools clang-tidy
-    adb fastboot fsarchiver inxi pv rsync p7zip-full makeself zenity innoextract needrestart flatpak timeshift
+    adb fastboot fsarchiver inxi pv rsync 7zip makeself zenity innoextract needrestart flatpak timeshift
     python3-defusedxml python3-packaging python3-pip python3-tqdm
     libayatana-appindicator3-1 gamemode mangohud vkd3d-compiler winetricks
     gcc g++ make cmake meson ninja-build cmake ninja-build pkg-config
@@ -536,7 +470,7 @@ SYSTEM_PKGS=(
 )
 
 PKGS_32BIT=(
-    libpulse0:i386 libopenal1:i386 mangohud:i386 wine32:i386
+    libpulse0:i386 libopenal1:i386 wine32:i386
     libgamemode0:i386 libgamemodeauto0:i386
     libpipewire-0.3-0t64:i386 pipewire-alsa:i386 libasound2-plugins:i386
     libxrandr2:i386 libxrender1:i386
@@ -556,7 +490,7 @@ for vendor in "${GPU_VENDORS[@]}"; do
                 SYSTEM_PKGS+=("libnvidia-gl-${NVIDIA_BRANCH}:i386" "libnvidia-compute-${NVIDIA_BRANCH}:amd64" "libnvidia-compute-${NVIDIA_BRANCH}:i386")
             fi
             ;;
-        "amd")    SYSTEM_PKGS+=(libgl1-mesa-dri:amd64 libgl1-mesa-dri:i386 mesa-vulkan-drivers:amd64 mesa-vulkan-drivers:i386 libglx-mesa0:amd64 libglx-mesa0:i386 vulkan-tools libvulkan-dev libgl1-mesa-dev mesa-common-dev mesa-va-drivers:amd64 mesa-va-drivers:i386 mesa-opencl-icd:amd64 mesa-opencl-icd:i386) ;;
+        "amd")    SYSTEM_PKGS+=(libgl1-mesa-dri:amd64 libgl1-mesa-dri:i386 mesa-vulkan-drivers:amd64 mesa-vulkan-drivers:i386 libglx-mesa0:amd64 libglx-mesa0:i386 vulkan-tools libvulkan-dev libgl1-mesa-dev mesa-common-dev mesa-va-drivers:amd64 mesa-va-drivers:i386 mesa-opencl-icd:amd64 ) ;;
         "intel")  SYSTEM_PKGS+=(libgl1-mesa-dri:amd64 libgl1-mesa-dri:i386 mesa-vulkan-drivers:amd64 mesa-vulkan-drivers:i386 libglx-mesa0:amd64 libglx-mesa0:i386 vulkan-tools libvulkan-dev libgl1-mesa-dev mesa-common-dev intel-media-va-driver-non-free:amd64 intel-media-va-driver-non-free:i386 intel-opencl-icd) ;;
     esac
 done
