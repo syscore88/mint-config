@@ -326,8 +326,6 @@ forget_failed() {
     FAILED_PACKAGES=("${keep[@]}")
 }
 
-# Pakiety bez kandydata w repozytorium są pomijane (jak w arch.sh) i trafiają
-# do FAILED_PACKAGES - komunikat wyświetla się na końcu skryptu.
 install_missing() {
     local -a opts=() valid=()
     local arg p rc=0
@@ -685,7 +683,7 @@ show_progress 8 $TOTAL_STEPS "$MSG_PHASE_3"
 restore_packagekit
 
 wait_for_apt
-install_missing -yq virt-manager qemu-system qemu-utils libvirt-daemon-system libvirt-clients ovmf dnsmasq bluetooth bluez bluez-firmware bluez-tools ufw || true
+install_missing -yq virt-manager qemu-system qemu-utils libvirt-daemon-system libvirt-clients || true
 
 if command -v dconf &>/dev/null; then
     dconf load /org/virt-manager/virt-manager/ <<'EOF'
