@@ -18,24 +18,6 @@ detect_system_lang() {
 }
 SCRIPT_LANG="$(detect_system_lang)"
 
-detect_system_locale() {
-    local sys_locale="${LANG:-}"
-    [[ -z "$sys_locale" ]] && sys_locale="${LC_ALL:-${LC_MESSAGES:-}}"
-    [[ -z "$sys_locale" ]] && sys_locale="en_US.UTF-8"
-
-    if command -v locale &>/dev/null; then
-        local available
-        available="$(locale -a 2>/dev/null)"
-        if echo "$available" | grep -qiF "$sys_locale" || \
-           echo "$available" | grep -qiF "$(echo "$sys_locale" | sed 's/UTF-8/utf8/')"; then
-            echo "$sys_locale"
-            return
-        fi
-    fi
-    echo "en_US.UTF-8"
-}
-SYSTEM_LOCALE="$(detect_system_locale)"
-
 INFO='\033[0;34m'
 SUCCESS='\033[0;32m'
 WARN='\033[0;33m'
@@ -44,6 +26,7 @@ NC='\033[0m'
 
 TMP_LOG="$(mktemp /tmp/mint-install-log.XXXXXX)"
 LOG_FILE="$HOME/install_error_$(date +%Y%m%d_%H%M%S).log"
+DEB_DIR="/tmp/debs_$$"
 
 exec 3>&1
 exec >>"$TMP_LOG" 2>&1
@@ -65,6 +48,7 @@ cleanup_on_exit() {
         fi
     fi
     rm -f "$TMP_LOG"
+    rm -rf "$DEB_DIR"
     local do_reboot=0
     [ "$exit_code" -eq 0 ] && [ "${DO_REBOOT:-0}" = "1" ] && do_reboot=1
     if [ "${SUDO_READY:-0}" = "1" ]; then
@@ -84,6 +68,57 @@ log_err()   { local m; m="$(_pick_msg "$1" "$2")"; _log_write "${ERR}[X] ERROR: 
 log_warn()  { local m; m="$(_pick_msg "$1" "$2")"; _log_write "${WARN}[!] WARN: $m${NC}"; }
 
 trap 'log_err "Błąd w linii $LINENO. Polecenie: $BASH_COMMAND" "Error at line $LINENO. Command: $BASH_COMMAND"' ERR
+
+# ==========================================================
+# PACKAGEKIT + BLOKADA MENEDŻERA PAKIETÓW
+# ==========================================================
+PACKAGEKIT_MASKED=0
+PACKAGEKIT_UNITS=(packagekit.service packagekit-offline-update.service)
+
+disable_packagekit() {
+    [[ "${PACKAGEKIT_MASKED:-0}" -eq 1 ]] && return 0
+    sudo systemctl stop "${PACKAGEKIT_UNITS[@]}" 2>/dev/null || true
+    if command -v killall >/dev/null 2>&1; then
+        sudo killall -q packagekitd 2>/dev/null || true
+    else
+        sudo pkill -x packagekitd 2>/dev/null || true
+    fi
+    sudo systemctl mask "${PACKAGEKIT_UNITS[@]}" 2>/dev/null || true
+    PACKAGEKIT_MASKED=1
+}
+
+restore_packagekit() {
+    [[ "${PACKAGEKIT_MASKED:-0}" -eq 1 ]] || return 0
+    sudo systemctl unmask "${PACKAGEKIT_UNITS[@]}" 2>/dev/null || true
+    PACKAGEKIT_MASKED=0
+}
+
+_pkg_lock_busy() {
+    local f
+    for f in /var/lib/dpkg/lock-frontend \
+             /var/lib/dpkg/lock \
+             /var/lib/apt/lists/lock \
+             /var/cache/apt/archives/lock; do
+        [[ -e "$f" ]] || continue
+        sudo fuser "$f" >/dev/null 2>&1 && return 0
+    done
+    pgrep -x 'apt|apt-get|apt-config|dpkg|unattended-upgrade|packagekitd' >/dev/null 2>&1 && return 0
+    return 1
+}
+
+wait_for_apt() {
+    local timeout="${1:-300}" waited=0
+    disable_packagekit
+    while _pkg_lock_busy; do
+        if (( waited >= timeout )); then
+            log_warn "Blokada menedżera pakietów trwa ponad ${timeout}s - kontynuuję mimo to." \
+                     "Package manager lock held for over ${timeout}s - continuing anyway."
+            break
+        fi
+        sleep 3
+        waited=$(( waited + 3 ))
+    done
+}
 
 show_progress() {
     local step=$1
@@ -136,13 +171,6 @@ fi
 TOTAL_STEPS=12
 FAILED_PACKAGES=()
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" &> /dev/null && pwd)"
-CURRENT_USER=$(whoami)
-DEB_DIR="/tmp/debs_$$"
-
-source /etc/os-release
-OS_CODENAME="${UBUNTU_CODENAME:-${VERSION_CODENAME:-}}"
-echo "Wykryty system: ${PRETTY_NAME:-nieznany}, codename: ${OS_CODENAME:-nieznany}"
 if [[ "$EUID" -eq 0 ]]; then
     if [[ "$SCRIPT_LANG" == "pl" ]]; then
         echo -e "${ERR}[X] Nie uruchamiaj skryptu jako root. Użyj zwykłego użytkownika z sudo.${NC}" >&3
@@ -151,6 +179,9 @@ if [[ "$EUID" -eq 0 ]]; then
     fi
     exit 1
 fi
+
+CURRENT_USER=$(whoami)
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" &> /dev/null && pwd)"
 
 printf '\033[?7h\n' >&3
 
@@ -206,98 +237,36 @@ fi
 
 printf '\033[?7l' >&3
 
+source /etc/os-release
+OS_CODENAME="${UBUNTU_CODENAME:-${VERSION_CODENAME:-}}"
+echo "Wykryty system: ${PRETTY_NAME:-nieznany}, codename: ${OS_CODENAME:-nieznany}"
+
 # ==========================================================
-# PACKAGEKIT + BLOKADA MENEDŻERA PAKIETÓW
+# ETAP 1/4: PRZYGOTOWYWANIE
 # ==========================================================
-PACKAGEKIT_MASKED=0
-PACKAGEKIT_UNITS=(packagekit.service packagekit-offline-update.service)
+show_progress 0 $TOTAL_STEPS "$MSG_PHASE_1"
 
-disable_packagekit() {
-    [[ "${PACKAGEKIT_MASKED:-0}" -eq 1 ]] && return 0
-    sudo systemctl stop "${PACKAGEKIT_UNITS[@]}" 2>/dev/null || true
-    if command -v killall >/dev/null 2>&1; then
-        sudo killall -q packagekitd 2>/dev/null || true
-    else
-        sudo pkill -x packagekitd 2>/dev/null || true
-    fi
-    sudo systemctl mask "${PACKAGEKIT_UNITS[@]}" 2>/dev/null || true
-    PACKAGEKIT_MASKED=1
-}
-
-restore_packagekit() {
-    [[ "${PACKAGEKIT_MASKED:-0}" -eq 1 ]] || return 0
-    sudo systemctl unmask "${PACKAGEKIT_UNITS[@]}" 2>/dev/null || true
-    PACKAGEKIT_MASKED=0
-}
-
-_pkg_lock_busy() {
-    local f
-    for f in /var/lib/dpkg/lock-frontend \
-             /var/lib/dpkg/lock \
-             /var/lib/apt/lists/lock \
-             /var/cache/apt/archives/lock; do
-        [[ -e "$f" ]] || continue
-        sudo fuser "$f" >/dev/null 2>&1 && return 0
-    done
-    pgrep -x 'apt|apt-get|apt-config|dpkg|unattended-upgrade|packagekitd' >/dev/null 2>&1 && return 0
-    return 1
-}
-
-wait_for_apt() {
-    local timeout="${1:-300}" waited=0
-    disable_packagekit
-    while _pkg_lock_busy; do
-        if (( waited >= timeout )); then
-            log_warn "Blokada menedżera pakietów trwa ponad ${timeout}s - kontynuuję mimo to." \
-                     "Package manager lock held for over ${timeout}s - continuing anyway."
-            break
-        fi
-        sleep 3
-        waited=$(( waited + 3 ))
-    done
-}
+disable_packagekit
 
 pkg_installed() {
     [[ "$(dpkg-query -W -f='${db:Status-Abbrev}' "$1" 2>/dev/null)" == ii* ]]
 }
 
-mark_failed() {
-    local p f
-    for p in "$@"; do
-        for f in "${FAILED_PACKAGES[@]}"; do
-            [[ "$f" == "$p" ]] && continue 2
-        done
-        FAILED_PACKAGES+=("$p")
-    done
-}
-
-install_missing() {
-    local -a opts=() valid=()
-    local arg p rc=0
-    for arg in "$@"; do
-        if [[ "$arg" == -* ]]; then
-            opts+=("$arg")
-        elif pkg_installed "$arg"; then
-            continue
+install_apt_pkgs() {
+    wait_for_apt
+    local valid_pkgs=()
+    for pkg in "$@"; do
+        pkg_installed "$pkg" && continue
+        if apt-cache show "$pkg" &>/dev/null; then
+            valid_pkgs+=("$pkg")
         else
-            valid+=("$arg")
+            FAILED_PACKAGES+=("$pkg")
         fi
     done
-    if (( ${#valid[@]} > 0 )); then
-        if ! sudo apt-get install "${opts[@]}" "${valid[@]}"; then
-            for p in "${valid[@]}"; do
-                pkg_installed "$p" && continue
-                if ! sudo apt-get install "${opts[@]}" "$p"; then
-                    mark_failed "$p"
-                    rc=1
-                fi
-            done
-        fi
-    fi
-    return "$rc"
+    for pkg in "${valid_pkgs[@]}"; do
+        sudo apt-get install -yq "$pkg" || FAILED_PACKAGES+=("$pkg")
+    done
 }
-
-disable_packagekit
 
 add_ppa_and_install() {
     local ppa="$1"; shift
@@ -309,60 +278,59 @@ add_ppa_and_install() {
     done
     [[ "$all_installed" -eq 1 ]] && return 0
 
-    if ! command -v add-apt-repository &>/dev/null; then mark_failed "${packages[@]}"; return 1; fi
-    if ! sudo add-apt-repository -y "ppa:$ppa" 2>/dev/null; then mark_failed "${packages[@]}"; return 1; fi
+    if ! command -v add-apt-repository &>/dev/null; then
+        log_warn "Brak polecenia add-apt-repository (dla ppa:$ppa)" "Command add-apt-repository not found (for ppa:$ppa)"
+        FAILED_PACKAGES+=("${packages[@]}")
+        return 1
+    fi
+
+    wait_for_apt
+    if ! sudo -E env DEBIAN_FRONTEND=noninteractive LC_ALL=C.UTF-8 add-apt-repository -y "ppa:$ppa"; then
+        if [[ -n "${OS_CODENAME:-}" ]]; then
+            local ppa_owner="${ppa%%/*}"
+            local ppa_name="${ppa#*/}"
+            local list_file="/etc/apt/sources.list.d/${ppa_owner}-ubuntu-${ppa_name}-${OS_CODENAME}.list"
+            echo "deb https://ppa.launchpadcontent.net/${ppa_owner}/${ppa_name}/ubuntu ${OS_CODENAME} main" | sudo tee "$list_file" >/dev/null
+            sudo apt-key adv --keyserver hkp://keyserver.ubuntu.com:80 --recv-keys 2>/dev/null || true
+        else
+            log_warn "Nie udało się dodać ppa:$ppa" "Failed to add ppa:$ppa"
+            FAILED_PACKAGES+=("${packages[@]}")
+            return 1
+        fi
+    fi
 
     wait_for_apt
     sudo apt-get update -yq || true
-    if install_missing -yq "${packages[@]}"; then
+    install_apt_pkgs "${packages[@]}"
+
+    all_installed=1
+    for p in "${packages[@]}"; do
+        if ! pkg_installed "$p"; then
+            all_installed=0
+        fi
+    done
+    if [[ "$all_installed" -eq 1 ]]; then
         return 0
     fi
 
-    mark_failed "${packages[@]}"
-    sudo add-apt-repository --remove -y "ppa:$ppa" 2>/dev/null || true
+    sudo -E env DEBIAN_FRONTEND=noninteractive LC_ALL=C.UTF-8 add-apt-repository --remove -y "ppa:$ppa" || true
     wait_for_apt
     sudo apt-get update -yq || true
     return 1
 }
-
-# ==========================================================
-# ETAP 1/4: PRZYGOTOWYWANIE
-# ==========================================================
-show_progress 0 $TOTAL_STEPS "$MSG_PHASE_1"
-
-if [[ -f "$SCRIPT_DIR/.update.sh" ]]; then
-    cp -af "$SCRIPT_DIR/.update.sh" ~/.update.sh
-    chmod +x ~/.update.sh
-fi
-
-if [[ -d "$SCRIPT_DIR/.local" ]]; then
-    mkdir -p ~/.local
-    cp -afT "$SCRIPT_DIR/.local" ~/.local
-fi
-
-if [[ -d "$SCRIPT_DIR/.config" ]]; then
-    mkdir -p ~/.config
-    cp -afT "$SCRIPT_DIR/.config" ~/.config
-fi
 
 wait_for_apt
 sudo sed -i '/cdrom/s/^/#/' /etc/apt/sources.list 2>/dev/null || true
 sudo dpkg --add-architecture i386 || true
 
 if command -v add-apt-repository &>/dev/null; then
-    sudo add-apt-repository -y universe  2>/dev/null || true
-    sudo add-apt-repository -y multiverse 2>/dev/null || true
+    sudo -E env DEBIAN_FRONTEND=noninteractive LC_ALL=C.UTF-8 add-apt-repository -y universe || true
+    sudo -E env DEBIAN_FRONTEND=noninteractive LC_ALL=C.UTF-8 add-apt-repository -y multiverse || true
 fi
-
-show_progress 1 $TOTAL_STEPS "$MSG_PHASE_1"
 
 wait_for_apt
 sudo apt-get update -yq || true
-for pkg in curl wget gnupg pciutils dconf-cli; do
-    install_missing -yq "$pkg" || true
-done
-sudo mkdir -p /etc/apt/keyrings
-sudo chmod 755 /etc/apt/keyrings
+install_apt_pkgs curl wget gnupg pciutils dconf-cli software-properties-common
 
 GPU_TYPE="unknown"
 HYBRID_GPU=false
@@ -384,9 +352,7 @@ if command -v lspci &>/dev/null; then
 
     if [ -z "$GPU_INFO" ] || [ "$TOTAL_KNOWN" -eq 0 ]; then
         HYBRID_GPU=false
-        for pkg in "${GPU_UNKNOWN_PKGS[@]}"; do
-            pkg_installed "$pkg" || install_missing -yq "$pkg" || true
-        done
+        install_apt_pkgs "${GPU_UNKNOWN_PKGS[@]}"
     elif [ "$TOTAL_KNOWN" -ge 2 ]; then
         HYBRID_GPU=true
         GPU_TYPE="$(IFS=+; echo "${GPU_VENDORS[*]}")"
@@ -396,10 +362,41 @@ if command -v lspci &>/dev/null; then
         GPU_TYPE="${GPU_VENDORS[0]}"
     fi
 else
-    for pkg in "${GPU_UNKNOWN_PKGS[@]}"; do
-        pkg_installed "$pkg" || install_missing -yq "$pkg" || true
-    done
+    install_apt_pkgs "${GPU_UNKNOWN_PKGS[@]}"
 fi
+
+if [[ -f "$SCRIPT_DIR/.update.sh" ]]; then
+    cp -af "$SCRIPT_DIR/.update.sh" ~/.update.sh
+    chmod +x ~/.update.sh
+fi
+
+if [[ -d "$SCRIPT_DIR/.local" ]]; then
+    mkdir -p ~/.local
+    cp -afT "$SCRIPT_DIR/.local" ~/.local
+fi
+
+if [[ -d "$SCRIPT_DIR/.config" ]]; then
+    mkdir -p ~/.config
+    cp -afT "$SCRIPT_DIR/.config" ~/.config
+fi
+
+show_progress 1 $TOTAL_STEPS "$MSG_PHASE_1"
+
+PACKAGES_REMOVE=()
+if [[ ${#PACKAGES_REMOVE[@]} -gt 0 ]]; then
+    wait_for_apt
+    for pkg in "${PACKAGES_REMOVE[@]}"; do
+        if pkg_installed "$pkg"; then
+            sudo apt-get purge -yq "$pkg" || true
+        fi
+    done
+    sudo apt-get autoremove --purge -yq || true
+fi
+
+show_progress 2 $TOTAL_STEPS "$MSG_PHASE_1"
+
+sudo mkdir -p /etc/apt/keyrings
+sudo chmod 755 /etc/apt/keyrings
 
 if [ ! -f /etc/apt/keyrings/google-chrome.gpg ]; then
     curl -fsSL https://dl.google.com/linux/linux_signing_key.pub | sudo gpg --dearmor --yes -o /etc/apt/keyrings/google-chrome.gpg
@@ -407,17 +404,8 @@ if [ ! -f /etc/apt/keyrings/google-chrome.gpg ]; then
     echo "deb [arch=amd64 signed-by=/etc/apt/keyrings/google-chrome.gpg] http://dl.google.com/linux/chrome/deb/ stable main" | sudo tee /etc/apt/sources.list.d/google-chrome.list > /dev/null
 fi
 
-show_progress 2 $TOTAL_STEPS "$MSG_PHASE_1"
-
 sudo mkdir -p /usr/share/keyrings
-sudo rm -f /usr/share/keyrings/brave-browser-archive-keyring.gpg
-BRAVE_KEY_ID="0686B78420038257"
-BRAVE_GNUPGHOME="$(mktemp -d)"
-if ! gpg --homedir "$BRAVE_GNUPGHOME" --keyserver hkps://keyserver.ubuntu.com --recv-keys "$BRAVE_KEY_ID"; then
-    gpg --homedir "$BRAVE_GNUPGHOME" --keyserver hkps://keys.openpgp.org --recv-keys "$BRAVE_KEY_ID" || true
-fi
-gpg --homedir "$BRAVE_GNUPGHOME" --export "$BRAVE_KEY_ID" | sudo tee /usr/share/keyrings/brave-browser-archive-keyring.gpg > /dev/null
-rm -rf "$BRAVE_GNUPGHOME"
+sudo curl -fsSLo /usr/share/keyrings/brave-browser-archive-keyring.gpg https://brave-browser-apt-release.s3.brave.com/brave-browser-archive-keyring.gpg
 sudo chmod 644 /usr/share/keyrings/brave-browser-archive-keyring.gpg
 sudo curl -fsSLo /etc/apt/sources.list.d/brave-browser-release.sources https://brave-browser-apt-release.s3.brave.com/brave-browser.sources
 
@@ -431,24 +419,7 @@ if [[ -n "$ACTIVE_CONN" ]]; then
     sudo nmcli connection up "$ACTIVE_CONN" || true
 fi
 
-wait_for_apt
-sudo apt-get update -yq || true
-sudo apt-get upgrade -yq || true
-
 show_progress 3 $TOTAL_STEPS "$MSG_PHASE_1"
-
-wait_for_apt
-install_missing -yq linux-firmware || true
-
-PACKAGES_REMOVE=()
-if [[ ${#PACKAGES_REMOVE[@]} -gt 0 ]]; then
-    for pkg in "${PACKAGES_REMOVE[@]}"; do
-        if dpkg -l | grep -q "^ii  $pkg "; then
-            sudo apt-get purge -yq "$pkg" || true
-        fi
-    done
-fi
-sudo apt-get autoremove -yq || true
 
 # ==========================================================
 # ETAP 2/4: INSTALACJA
@@ -456,17 +427,29 @@ sudo apt-get autoremove -yq || true
 show_progress 4 $TOTAL_STEPS "$MSG_PHASE_2"
 
 wait_for_apt
+sudo apt-get update -yq || true
+sudo apt-get upgrade -yq || true
+sudo apt-get autoremove -yq || true
+
+show_progress 5 $TOTAL_STEPS "$MSG_PHASE_2"
+
 SYSTEM_PKGS=(
-    google-chrome-stable brave-origin krita mixxx kdenlive gimp soundconverter
+    google-chrome-stable brave-origin telegram-desktop krita mixxx kdenlive gimp soundconverter
     vim dconf-editor hunspell-pl bleachbit profile-sync-daemon git build-essential
     unrar-free mc btrfs-progs exfatprogs ntfs-3g os-prober llvm clang clang-tools clang-tidy
     adb fastboot fsarchiver inxi pv rsync 7zip makeself zenity innoextract needrestart flatpak timeshift
     python3-defusedxml python3-packaging python3-pip python3-tqdm
     libayatana-appindicator3-1 gamemode mangohud vkd3d-compiler winetricks
-    gcc g++ make cmake meson ninja-build cmake ninja-build pkg-config
+    gcc g++ make cmake meson ninja-build pkg-config
     ghostwriter gnome-disk-utility zram-tools
     zsh zsh-syntax-highlighting zsh-autosuggestions
     wine wine64
+    handbrake handbrake-cli
+    virt-manager qemu-system qemu-utils libvirt-daemon-system libvirt-clients
+    qt6-qpa-plugins libqt6quick6 qml6-module-qtquick-controls
+    qml6-module-qtquick-layouts qml6-module-qtquick-window
+    qml6-module-qtquick-dialogs qml6-module-qtqml-workerscript
+    qml6-module-qtquick-templates qml6-module-qt-labs-folderlistmodel
 )
 
 PKGS_32BIT=(
@@ -490,7 +473,7 @@ for vendor in "${GPU_VENDORS[@]}"; do
                 SYSTEM_PKGS+=("libnvidia-gl-${NVIDIA_BRANCH}:i386" "libnvidia-compute-${NVIDIA_BRANCH}:amd64" "libnvidia-compute-${NVIDIA_BRANCH}:i386")
             fi
             ;;
-        "amd")    SYSTEM_PKGS+=(libgl1-mesa-dri:amd64 libgl1-mesa-dri:i386 mesa-vulkan-drivers:amd64 mesa-vulkan-drivers:i386 libglx-mesa0:amd64 libglx-mesa0:i386 vulkan-tools libvulkan-dev libgl1-mesa-dev mesa-common-dev mesa-va-drivers:amd64 mesa-va-drivers:i386 mesa-opencl-icd:amd64 ) ;;
+        "amd")    SYSTEM_PKGS+=(libgl1-mesa-dri:amd64 libgl1-mesa-dri:i386 mesa-vulkan-drivers:amd64 mesa-vulkan-drivers:i386 libglx-mesa0:amd64 libglx-mesa0:i386 vulkan-tools libvulkan-dev libgl1-mesa-dev mesa-common-dev mesa-va-drivers:amd64 mesa-va-drivers:i386 mesa-opencl-icd:amd64) ;;
         "intel")  SYSTEM_PKGS+=(libgl1-mesa-dri:amd64 libgl1-mesa-dri:i386 mesa-vulkan-drivers:amd64 mesa-vulkan-drivers:i386 libglx-mesa0:amd64 libglx-mesa0:i386 vulkan-tools libvulkan-dev libgl1-mesa-dev mesa-common-dev intel-media-va-driver-non-free:amd64 intel-media-va-driver-non-free:i386 intel-opencl-icd) ;;
     esac
 done
@@ -499,22 +482,26 @@ if [ "${#GPU_VENDORS[@]}" -gt 0 ]; then
     readarray -t SYSTEM_PKGS < <(printf '%s\n' "${SYSTEM_PKGS[@]}" | awk '!seen[$0]++')
 fi
 
-install_missing -yq "${SYSTEM_PKGS[@]}" || true
-install_missing -yq "${PKGS_32BIT[@]}" || true
-install_missing -yq "${PKGS_CODECS[@]}" || true
+install_apt_pkgs "${SYSTEM_PKGS[@]}"
+install_apt_pkgs "${PKGS_32BIT[@]}"
+install_apt_pkgs "${PKGS_CODECS[@]}"
 
-show_progress 5 $TOTAL_STEPS "$MSG_PHASE_2"
+show_progress 6 $TOTAL_STEPS "$MSG_PHASE_2"
 
 if command -v flatpak &>/dev/null; then
     sudo flatpak remote-add --if-not-exists flathub https://dl.flathub.org/repo/flathub.flatpakrepo || true
+    sudo flatpak update --appstream || true
+    flatpak info com.github.tchx84.Flatseal &>/dev/null || sudo flatpak install -y flathub com.github.tchx84.Flatseal || true
+    flatpak info it.mijorus.gearlever &>/dev/null || sudo flatpak install -y flathub it.mijorus.gearlever || true
 fi
 
-add_ppa_and_install "atareao/telegram" telegram || true
-add_ppa_and_install "zhangsongcui3371/fastfetch" fastfetch || true
+show_progress 7 $TOTAL_STEPS "$MSG_PHASE_2"
 
-wait_for_apt
-install_missing -yq handbrake handbrake-cli || true
-install_missing -yq cdemu-daemon cdemu-client || true
+add_ppa_and_install "cdemu/ppa" cdemu-daemon cdemu-client || true
+add_ppa_and_install "zhangsongcui3371/fastfetch" fastfetch || true
+add_ppa_and_install "faugus/faugus-launcher" faugus-launcher || true
+
+sudo depmod -a || true
 
 sudo systemctl disable --now cdemu-daemon 2>/dev/null || true
 sudo systemctl mask cdemu-daemon 2>/dev/null || true
@@ -531,36 +518,6 @@ for f in /etc/xdg/autostart/gcdemu.desktop /etc/xdg/autostart/cdemu.desktop /usr
 done
 pkill -f gcdemu 2>/dev/null || true
 
-if command -v flatpak &>/dev/null; then
-    flatpak info com.github.tchx84.Flatseal &>/dev/null || sudo flatpak install -y flathub com.github.tchx84.Flatseal || true
-fi
-
-show_progress 6 $TOTAL_STEPS "$MSG_PHASE_2"
-
-MODULES_FILE="/etc/initramfs-tools/modules"
-add_module() { grep -q "^$1" "$MODULES_FILE" || echo "$1" | sudo tee -a "$MODULES_FILE" > /dev/null; }
-
-if [[ $GPU_TYPE == *"nvidia"* ]]; then
-    add_module "nvidia"
-    add_module "nvidia_modeset"
-    add_module "nvidia_uvm"
-    add_module "nvidia_drm"
-fi
-if [[ $GPU_TYPE == *"amd"* ]]; then
-    add_module "amdgpu"
-fi
-if [[ $GPU_TYPE == *"intel"* ]]; then
-    add_module "i915"
-fi
-
-sudo update-initramfs -u || true
-flatpak info it.mijorus.gearlever &>/dev/null || sudo flatpak install -y flathub it.mijorus.gearlever || true
-
-wait_for_apt
-install_missing -yq "linux-headers-$(uname -r)" || true
-
-show_progress 7 $TOTAL_STEPS "$MSG_PHASE_2"
-
 mkdir -p "$DEB_DIR"
 download_deb() { wget -q --timeout=30 -O "$3" "$2" || rm -f "$3"; }
 get_github_deb_url() { curl -sfL "https://api.github.com/repos/${1}/releases/latest" | grep "browser_download_url.*${2}" | cut -d '"' -f 4 || true; }
@@ -570,22 +527,20 @@ OPENCODE_URL=""
 pkg_installed opencode-desktop || OPENCODE_URL=$(get_github_deb_url "anomalyco/opencode" "opencode-desktop-linux-amd64\\.deb")
 [[ -n "$OPENCODE_URL" ]] && download_deb "opencode-desktop" "$OPENCODE_URL" "$DEB_DIR/opencode-desktop.deb"
 
-add_ppa_and_install "faugus/faugus-launcher" faugus-launcher || true
-
 shopt -s nullglob
 DEB_FILES=("$DEB_DIR"/*.deb)
+shopt -u nullglob
 if [[ ${#DEB_FILES[@]} -gt 0 ]]; then
     wait_for_apt
     for deb in "${DEB_FILES[@]}"; do
-        sudo apt-get install -yq "$deb" || true
+        sudo apt-get install -yq "$deb" || FAILED_PACKAGES+=("$(basename "$deb" .deb)")
     done
 fi
-shopt -u nullglob
 rm -rf "$DEB_DIR"
 
 LSFG_TMP="$(mktemp -d)"
 LSFG_UA="Mozilla/5.0 (X11; Linux x86_64; rv:128.0) Gecko/20100101 Firefox/128.0"
-LSFG_HTML="$(curl -fsSL -A "$LSFG_UA" -e "https://builds.lsfg-vk.dev/" "https://builds.lsfg-vk.dev/" 2>/dev/null || true)"
+LSFG_HTML="$(curl -fsSL -A "$LSFG_UA" -e "https://builds.lsfg-vk.dev/" "https://builds.lsfg-vk.dev/" || true)"
 LSFG_LINKS="$( { printf '%s' "$LSFG_HTML" | grep -oiE 'href="[^"]+\.tar\.xz"' | sed -E 's/^href="//I; s/"$//'; } || true )
 $( { printf '%s' "$LSFG_HTML" | grep -oiE 'https?://[^"'"'"'<>[:space:]]+\.tar\.xz'; } || true )"
 LSFG_URL="$(printf '%s\n' "$LSFG_LINKS" | grep -iE '(^|/)lsfg-vk-[0-9]+(\.[0-9]+)*\.tar\.xz$' | sort -Vu | tail -n1 || true)"
@@ -598,7 +553,7 @@ if [[ -n "$LSFG_URL" && "$LSFG_URL" != http* ]]; then
         *)  LSFG_URL="https://builds.lsfg-vk.dev/${LSFG_URL}" ;;
     esac
 fi
-if [[ -n "$LSFG_URL" ]] && curl -fsSL -A "$LSFG_UA" -o "$LSFG_TMP/lsfg-vk.tar.xz" "$LSFG_URL" 2>/dev/null && tar -tf "$LSFG_TMP/lsfg-vk.tar.xz" &>/dev/null && mkdir -p "$HOME/.local" && tar -xf "$LSFG_TMP/lsfg-vk.tar.xz" -C "$HOME/.local"; then
+if [[ -n "$LSFG_URL" ]] && curl -fsSL -A "$LSFG_UA" -o "$LSFG_TMP/lsfg-vk.tar.xz" "$LSFG_URL" && tar -tf "$LSFG_TMP/lsfg-vk.tar.xz" &>/dev/null && mkdir -p "$HOME/.local" && tar -xf "$LSFG_TMP/lsfg-vk.tar.xz" -C "$HOME/.local"; then
     :
 else
     log_warn "lsfg-vk: nie udało się pobrać gotowej paczki, pomijam" \
@@ -606,15 +561,97 @@ else
 fi
 rm -rf "$LSFG_TMP"
 
+show_progress 8 $TOTAL_STEPS "$MSG_PHASE_2"
+
 # ==========================================================
 # ETAP 3/4: OPTYMALIZACJA
 # ==========================================================
-show_progress 8 $TOTAL_STEPS "$MSG_PHASE_3"
+show_progress 9 $TOTAL_STEPS "$MSG_PHASE_3"
 
 restore_packagekit
 
-wait_for_apt
-install_missing -yq virt-manager qemu-system qemu-utils libvirt-daemon-system libvirt-clients || true
+if [ -f /etc/default/grub ]; then
+    sudo sed -i 's/^GRUB_TIMEOUT=.*/GRUB_TIMEOUT=0/' /etc/default/grub || true
+    grep -q 'mitigations=off' /etc/default/grub || sudo sed -i 's/^\(GRUB_CMDLINE_LINUX_DEFAULT="[^"]*\)"/\1 mitigations=off"/' /etc/default/grub || true
+    grep -q 'split_lock_detect=off' /etc/default/grub || sudo sed -i 's/^\(GRUB_CMDLINE_LINUX_DEFAULT="[^"]*\)"/\1 split_lock_detect=off"/' /etc/default/grub || true
+    if [[ $GPU_TYPE == *"nvidia"* ]]; then
+        grep -q 'nvidia_drm.modeset=1' /etc/default/grub || sudo sed -i 's/^\(GRUB_CMDLINE_LINUX_DEFAULT="[^"]*\)"/\1 nvidia_drm.modeset=1"/' /etc/default/grub || true
+    fi
+    sudo update-grub || true
+fi
+
+show_progress 10 $TOTAL_STEPS "$MSG_PHASE_3"
+
+MODULES_FILE="/etc/initramfs-tools/modules"
+if [ -f "$MODULES_FILE" ]; then
+    add_module() { grep -q "^$1" "$MODULES_FILE" || echo "$1" | sudo tee -a "$MODULES_FILE" > /dev/null; }
+
+    if [[ $GPU_TYPE == *"nvidia"* ]]; then
+        add_module "nvidia"
+        add_module "nvidia_modeset"
+        add_module "nvidia_uvm"
+        add_module "nvidia_drm"
+    fi
+    if [[ $GPU_TYPE == *"amd"* ]]; then
+        add_module "amdgpu"
+    fi
+    if [[ $GPU_TYPE == *"intel"* ]]; then
+        add_module "i915"
+    fi
+
+    sudo update-initramfs -u || true
+fi
+
+show_progress 11 $TOTAL_STEPS "$MSG_PHASE_3"
+
+sudo systemctl enable --now fstrim.timer || true
+sudo systemctl enable --now bluetooth || true
+echo "options btusb enable_autosuspend=0" | sudo tee /etc/modprobe.d/btusb.conf > /dev/null
+
+for svc in libvirtd virtqemud; do
+    if systemctl list-unit-files "${svc}.service" 2>/dev/null | grep -q "$svc"; then
+        sudo systemctl enable --now "${svc}.service" || true
+        break
+    fi
+done
+
+LIBVIRT_NET="192.168.122.0/24"
+if ip -4 -o addr show 2>/dev/null | awk '$2 != "virbr0" && $4 ~ /^192\.168\.122\./ {found=1} END {exit !found}'; then
+    LIBVIRT_NET="192.168.150.0/24"
+fi
+
+if ! sudo virsh net-info default &>/dev/null; then
+    sudo virsh net-define /usr/share/libvirt/networks/default.xml || true
+fi
+
+if [[ "$LIBVIRT_NET" == "192.168.150.0/24" ]]; then
+    LIBVIRT_NET_XML="$(mktemp)"
+    if sudo virsh net-dumpxml default --inactive 2>/dev/null > "$LIBVIRT_NET_XML" && grep -q '192\.168\.122\.' "$LIBVIRT_NET_XML"; then
+        sed -i 's/192\.168\.122\./192.168.150./g' "$LIBVIRT_NET_XML"
+        sudo virsh net-destroy default 2>/dev/null || true
+        sudo virsh net-undefine default 2>/dev/null || true
+        sudo virsh net-define "$LIBVIRT_NET_XML" || true
+    fi
+    rm -f "$LIBVIRT_NET_XML"
+fi
+
+sudo virsh net-start default 2>/dev/null || true
+sudo virsh net-autostart default 2>/dev/null || true
+
+if command -v ufw &>/dev/null || [[ -x /usr/sbin/ufw ]]; then
+    [[ -f /etc/default/ufw ]] && sudo sed -i 's/^DEFAULT_FORWARD_POLICY=.*/DEFAULT_FORWARD_POLICY="ACCEPT"/' /etc/default/ufw || true
+    sudo ufw --force reset || true
+    sudo ufw default deny incoming || true
+    sudo ufw default allow outgoing || true
+    sudo ufw allow in  on virbr0 || true
+    sudo ufw allow out on virbr0 || true
+    sudo ufw allow from "$LIBVIRT_NET" || true
+    if pkg_installed openssh-server || [[ -x /usr/sbin/sshd ]] || systemctl is-active --quiet ssh 2>/dev/null || systemctl is-active --quiet sshd 2>/dev/null; then
+        sudo ufw allow ssh || true
+    fi
+    sudo ufw --force enable || true
+    sudo systemctl enable --now ufw || true
+fi
 
 if command -v dconf &>/dev/null; then
     dconf load /org/virt-manager/virt-manager/ <<'EOF'
@@ -651,70 +688,17 @@ enable-net-poll=true
 [vmlist-fields]
 disk-usage=false
 network-traffic=false
-
-autoconnect=1
-vm-window-size=(1280, 842)
 EOF
 fi
 
-for svc in libvirtd virtqemud; do
-    if systemctl list-unit-files "${svc}.service" 2>/dev/null | grep -q "$svc"; then
-        sudo systemctl enable --now "${svc}.service" || true
-        break
-    fi
-done
-
-LIBVIRT_NET="192.168.122.0/24"
-if ip -4 -o addr show 2>/dev/null | awk '$2 != "virbr0" && $4 ~ /^192\.168\.122\./ {found=1} END {exit !found}'; then
-    LIBVIRT_NET="192.168.150.0/24"
-fi
-
-if ! sudo virsh net-info default &>/dev/null; then
-    sudo virsh net-define /usr/share/libvirt/networks/default.xml || true
-fi
-
-if [[ "$LIBVIRT_NET" == "192.168.150.0/24" ]]; then
-    LIBVIRT_NET_XML="$(mktemp)"
-    if sudo virsh net-dumpxml default --inactive 2>/dev/null > "$LIBVIRT_NET_XML" && grep -q '192\.168\.122\.' "$LIBVIRT_NET_XML"; then
-        sed -i 's/192\.168\.122\./192.168.150./g' "$LIBVIRT_NET_XML"
-        sudo virsh net-destroy default 2>/dev/null || true
-        sudo virsh net-undefine default 2>/dev/null || true
-        sudo virsh net-define "$LIBVIRT_NET_XML" || true
-    fi
-    rm -f "$LIBVIRT_NET_XML"
-fi
-
-sudo virsh net-start default 2>/dev/null || true
-sudo virsh net-autostart default || true
-
-if command -v ufw &>/dev/null || [[ -x /usr/sbin/ufw ]]; then
-    [[ -f /etc/default/ufw ]] && sudo sed -i 's/^DEFAULT_FORWARD_POLICY=.*/DEFAULT_FORWARD_POLICY="ACCEPT"/' /etc/default/ufw || true
-    sudo ufw --force reset || true
-    sudo ufw default deny incoming || true
-    sudo ufw default allow outgoing || true
-    sudo ufw allow in  on virbr0 || true
-    sudo ufw allow out on virbr0 || true
-    sudo ufw allow from "$LIBVIRT_NET" || true
-    if dpkg -s openssh-server &>/dev/null || [[ -x /usr/sbin/sshd ]] || systemctl is-active --quiet ssh 2>/dev/null || systemctl is-active --quiet sshd 2>/dev/null; then
-        sudo ufw allow ssh || true
-    fi
-    sudo ufw --force enable || true
-fi
+sudo sed -i 's/^#\?[[:space:]]*DefaultTimeoutStopSec=.*/DefaultTimeoutStopSec=3s/' /etc/systemd/system.conf
+sudo sed -i 's/^#\?[[:space:]]*DefaultTimeoutStartSec=.*/DefaultTimeoutStartSec=3s/' /etc/systemd/system.conf
+sudo systemctl disable NetworkManager-wait-online.service 2>/dev/null || true
+sudo journalctl --vacuum-time=2d || true
 
 for grp in libvirt libvirt-qemu kvm; do
     getent group "$grp" &>/dev/null && sudo usermod -aG "$grp" "$CURRENT_USER" || true
 done
-
-show_progress 9 $TOTAL_STEPS "$MSG_PHASE_3"
-
-sudo systemctl enable fstrim.timer || true
-sudo journalctl --vacuum-time=2d || true
-sudo sed -i 's/^GRUB_TIMEOUT=.*/GRUB_TIMEOUT=0/' /etc/default/grub || true
-grep -q 'mitigations=off' /etc/default/grub || sudo sed -i 's/^\(GRUB_CMDLINE_LINUX_DEFAULT="[^"]*\)"/\1 mitigations=off"/' /etc/default/grub || true
-grep -q 'split_lock_detect=off' /etc/default/grub || sudo sed -i 's/^\(GRUB_CMDLINE_LINUX_DEFAULT="[^"]*\)"/\1 split_lock_detect=off"/' /etc/default/grub || true
-sudo update-grub || true
-
-show_progress 10 $TOTAL_STEPS "$MSG_PHASE_3"
 
 if command -v zsh &>/dev/null; then
     sudo chsh -s /usr/bin/zsh "$CURRENT_USER" || true
@@ -725,23 +709,39 @@ if command -v zsh &>/dev/null; then
     if [[ ! -d "$P10K_DIR" ]]; then
         git clone --depth=1 https://github.com/romkatv/powerlevel10k.git "$P10K_DIR" || true
     fi
-    ZSHRC="$HOME/.zshrc"
-    if [[ -f "$ZSHRC" ]]; then
-        sed -i 's|^ZSH_THEME=.*|ZSH_THEME="powerlevel10k/powerlevel10k"|' "$ZSHRC" || true
-        sed -i 's/^plugins=(.*/plugins=(git sudo systemd debian)/' "$ZSHRC" || true
-        grep -q "LC_ALL=$SYSTEM_LOCALE" "$ZSHRC" || echo "export LC_ALL=$SYSTEM_LOCALE" >> "$ZSHRC"
-        grep -q "^fastfetch"         "$ZSHRC" || echo "fastfetch"                  >> "$ZSHRC"
-        grep -q "zsh-syntax-highlighting.zsh" "$ZSHRC" || echo "source /usr/share/zsh-syntax-highlighting/zsh-syntax-highlighting.zsh" >> "$ZSHRC"
-        grep -q "zsh-autosuggestions.zsh"     "$ZSHRC" || echo "source /usr/share/zsh-autosuggestions/zsh-autosuggestions.zsh"         >> "$ZSHRC"
+    if [[ -f ~/.zshrc ]]; then
+        sed -i 's|^ZSH_THEME=.*|ZSH_THEME="powerlevel10k/powerlevel10k"|' ~/.zshrc || true
+        sed -i 's/^plugins=(.*/plugins=(git sudo systemd debian)/' ~/.zshrc || true
+
+        SHELL_LOCALE="${LANG:-${LC_ALL:-${LC_MESSAGES:-en_US.UTF-8}}}"
+        if command -v locale &>/dev/null; then
+            AVAILABLE_LOCALES="$(locale -a 2>/dev/null)"
+            if ! echo "$AVAILABLE_LOCALES" | grep -qiF "$SHELL_LOCALE" && ! echo "$AVAILABLE_LOCALES" | grep -qiF "$(echo "$SHELL_LOCALE" | sed 's/UTF-8/utf8/')"; then
+                SHELL_LOCALE="en_US.UTF-8"
+            fi
+        fi
+        if ! grep -q "^export LC_ALL=" ~/.zshrc; then
+            {
+                echo ""
+                echo "export LC_ALL=${SHELL_LOCALE}"
+                echo "export LC_MESSAGES=${SHELL_LOCALE}"
+                echo "fastfetch"
+            } >> ~/.zshrc
+        fi
+
+        if ! grep -q "zsh-syntax-highlighting.zsh" ~/.zshrc; then
+            {
+                echo ""
+                echo "source /usr/share/zsh-syntax-highlighting/zsh-syntax-highlighting.zsh"
+                echo "source /usr/share/zsh-autosuggestions/zsh-autosuggestions.zsh"
+            } >> ~/.zshrc
+        fi
     fi
 fi
-
-show_progress 11 $TOTAL_STEPS "$MSG_PHASE_3"
 
 # ==========================================================
 # ETAP 4/4: CZYSZCZENIE
 # ==========================================================
-
 show_progress 12 $TOTAL_STEPS "$MSG_PHASE_4"
 printf '\n\n' >&3
 
