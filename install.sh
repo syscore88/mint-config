@@ -434,7 +434,7 @@ sudo apt-get autoremove -yq || true
 show_progress 5 $TOTAL_STEPS "$MSG_PHASE_2"
 
 SYSTEM_PKGS=(
-    google-chrome-stable brave-origin telegram-desktop krita mixxx kdenlive gimp soundconverter
+    google-chrome-stable brave-origin krita mixxx kdenlive gimp soundconverter
     vim dconf-editor hunspell-pl bleachbit profile-sync-daemon git build-essential
     unrar-free mc btrfs-progs exfatprogs ntfs-3g os-prober llvm clang clang-tools clang-tidy
     adb fastboot fsarchiver inxi pv rsync 7zip makeself zenity innoextract needrestart flatpak timeshift
@@ -446,7 +446,7 @@ SYSTEM_PKGS=(
     wine wine64
     handbrake handbrake-cli
     virt-manager qemu-system qemu-utils libvirt-daemon-system libvirt-clients
-    qt6-qpa-plugins libqt6quick6 qml6-module-qtquick-controls
+    libqt6quick6 qml6-module-qtquick-controls
     qml6-module-qtquick-layouts qml6-module-qtquick-window
     qml6-module-qtquick-dialogs qml6-module-qtqml-workerscript
     qml6-module-qtquick-templates qml6-module-qt-labs-folderlistmodel
@@ -498,6 +498,7 @@ fi
 show_progress 7 $TOTAL_STEPS "$MSG_PHASE_2"
 
 add_ppa_and_install "cdemu/ppa" cdemu-daemon cdemu-client || true
+add_ppa_and_install "atareao/telegram" telegram || true
 add_ppa_and_install "zhangsongcui3371/fastfetch" fastfetch || true
 add_ppa_and_install "faugus/faugus-launcher" faugus-launcher || true
 
