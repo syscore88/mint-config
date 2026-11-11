@@ -578,12 +578,9 @@ fi
 add_ppa_and_install "atareao/telegram" telegram || true
 add_ppa_and_install "zhangsongcui3371/fastfetch" fastfetch || true
 
-add_ppa_and_install "stebbins/handbrake-releases" handbrake handbrake-cli || {
-    wait_for_apt
-    install_missing -yq handbrake handbrake-cli || true
-} || true
-
-add_ppa_and_install "cdemu/ppa" cdemu-daemon cdemu-client || true
+wait_for_apt
+install_missing -yq handbrake handbrake-cli || true
+install_missing -yq cdemu-daemon cdemu-client || true
 
 sudo systemctl disable --now cdemu-daemon 2>/dev/null || true
 sudo systemctl mask cdemu-daemon 2>/dev/null || true
