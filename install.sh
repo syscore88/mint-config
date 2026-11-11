@@ -578,10 +578,10 @@ fi
 add_ppa_and_install "atareao/telegram" telegram || true
 add_ppa_and_install "zhangsongcui3371/fastfetch" fastfetch || true
 
-if ! add_ppa_and_install "stebbins/handbrake-releases" handbrake handbrake-cli; then
+add_ppa_and_install "stebbins/handbrake-releases" handbrake handbrake-cli || {
     wait_for_apt
     install_missing -yq handbrake handbrake-cli || true
-fi
+} || true
 
 add_ppa_and_install "cdemu/ppa" cdemu-daemon cdemu-client || true
 
