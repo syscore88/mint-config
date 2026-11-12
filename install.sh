@@ -461,7 +461,7 @@ PKGS_32BIT=(
 
 PKGS_CODECS=(
     gstreamer1.0-plugins-good gstreamer1.0-plugins-bad gstreamer1.0-plugins-ugly
-    mint-meta-codecs ffmpeg x264 gstreamer1.0-libav
+    ffmpeg x264 gstreamer1.0-libav
 )
 
 for vendor in "${GPU_VENDORS[@]}"; do
