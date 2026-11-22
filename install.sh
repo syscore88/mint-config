@@ -468,6 +468,11 @@ for vendor in "${GPU_VENDORS[@]}"; do
     case "$vendor" in
         "nvidia")
             NVIDIA_BRANCH=$(dpkg -l 2>/dev/null | grep -oP '^ii\s+nvidia-driver-\K[0-9]+' | sort -un | tail -1 || true)
+            NVIDIA_OPEN_BRANCH=$(apt-cache pkgnames nvidia-driver- 2>/dev/null | grep -oP '^nvidia-driver-\K[0-9]+(?=-open$)' | sort -un | tail -1 || true)
+            if [[ -n "$NVIDIA_OPEN_BRANCH" ]]; then
+                NVIDIA_BRANCH="$NVIDIA_OPEN_BRANCH"
+                SYSTEM_PKGS+=("nvidia-driver-${NVIDIA_OPEN_BRANCH}-open")
+            fi
             SYSTEM_PKGS+=(vulkan-tools libvulkan-dev libgl1-mesa-dev mesa-common-dev nvidia-vaapi-driver:amd64 nvidia-vaapi-driver:i386)
             if [[ -n "$NVIDIA_BRANCH" ]]; then
                 SYSTEM_PKGS+=("libnvidia-gl-${NVIDIA_BRANCH}:i386" "libnvidia-compute-${NVIDIA_BRANCH}:amd64" "libnvidia-compute-${NVIDIA_BRANCH}:i386")
