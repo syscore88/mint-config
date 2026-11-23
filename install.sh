@@ -321,29 +321,69 @@ add_ppa_and_install() {
     done
     [[ "$all_installed" -eq 1 ]] && return 0
 
-    if ! command -v add-apt-repository &>/dev/null; then
-        log_warn "Brak polecenia add-apt-repository (dla ppa:$ppa)" "Command add-apt-repository not found (for ppa:$ppa)"
-        FAILED_PACKAGES+=("${packages[@]}")
-        return 1
+    local all_available=1
+    for p in "${packages[@]}"; do
+        pkg_installed "$p" && continue
+        apt-cache show "$p" &>/dev/null || all_available=0
+    done
+    if [[ "$all_available" -eq 1 ]]; then
+        install_apt_pkgs "${packages[@]}"
+        all_installed=1
+        for p in "${packages[@]}"; do
+            pkg_installed "$p" || all_installed=0
+        done
+        [[ "$all_installed" -eq 1 ]] && return 0
     fi
 
-    wait_for_apt
-    if ! sudo env DEBIAN_FRONTEND=noninteractive LC_ALL=C.UTF-8 add-apt-repository -y "ppa:$ppa"; then
-        if [[ -n "${OS_CODENAME:-}" ]]; then
-            local ppa_owner="${ppa%%/*}"
-            local ppa_name="${ppa#*/}"
-            local list_file="/etc/apt/sources.list.d/${ppa_owner}-ubuntu-${ppa_name}-${OS_CODENAME}.list"
-            echo "deb https://ppa.launchpadcontent.net/${ppa_owner}/${ppa_name}/ubuntu ${OS_CODENAME} main" | sudo tee "$list_file" >/dev/null
-            sudo apt-key adv --keyserver hkp://keyserver.ubuntu.com:80 --recv-keys 2>/dev/null || true
-        else
-            log_warn "Nie udało się dodać ppa:$ppa" "Failed to add ppa:$ppa"
-            FAILED_PACKAGES+=("${packages[@]}")
-            return 1
+    local ppa_owner="${ppa%%/*}"
+    local ppa_name="${ppa#*/}"
+    local keyring_file="/etc/apt/keyrings/ppa-${ppa_owner}-${ppa_name}.gpg"
+    local list_file="/etc/apt/sources.list.d/ppa-${ppa_owner}-${ppa_name}.list"
+    local added_via_cmd=0
+
+    if command -v add-apt-repository &>/dev/null; then
+        wait_for_apt
+        if sudo env DEBIAN_FRONTEND=noninteractive LC_ALL=C.UTF-8 add-apt-repository -y "ppa:$ppa"; then
+            added_via_cmd=1
+            wait_for_apt
+            apt_get update -yq || log_quiet "apt-get update zakończył się błędem." "apt-get update failed."
         fi
     fi
 
-    wait_for_apt
-    apt_get update -yq || log_quiet "apt-get update zakończył się błędem." "apt-get update failed."
+    all_available=1
+    for p in "${packages[@]}"; do
+        pkg_installed "$p" && continue
+        apt-cache show "$p" &>/dev/null || all_available=0
+    done
+
+    if [[ "$all_available" -eq 0 ]]; then
+        if [[ "$added_via_cmd" -eq 1 ]]; then
+            sudo env DEBIAN_FRONTEND=noninteractive LC_ALL=C.UTF-8 add-apt-repository --remove -y "ppa:$ppa" || true
+            added_via_cmd=0
+        fi
+        local fallback_codename="" c
+        for c in "${OS_CODENAME:-}" resolute questing plucky oracular noble mantic jammy; do
+            [[ -z "$c" ]] && continue
+            if curl -fsI --max-time 10 "https://ppa.launchpadcontent.net/${ppa_owner}/${ppa_name}/ubuntu/dists/${c}/Release" >/dev/null 2>&1; then
+                fallback_codename="$c"
+                break
+            fi
+        done
+        if [[ -n "$fallback_codename" ]]; then
+            local ppa_json fp
+            ppa_json="$(curl -fsSL --retry 3 --retry-delay 2 "https://api.launchpad.net/1.0/~${ppa_owner}/+archive/ubuntu/${ppa_name}" 2>/dev/null || true)"
+            fp="$(grep -oP '"signing_key_fingerprint"\s*:\s*"\K[0-9A-Fa-f]+' <<< "$ppa_json" | head -n1 || true)"
+            if [[ -n "$fp" ]] && curl -fsSL --retry 3 --retry-delay 2 "https://keyserver.ubuntu.com/pks/lookup?op=get&search=0x${fp}" | sudo gpg --dearmor --yes -o "$keyring_file" 2>/dev/null; then
+                sudo chmod 644 "$keyring_file" || true
+                echo "deb [signed-by=${keyring_file}] https://ppa.launchpadcontent.net/${ppa_owner}/${ppa_name}/ubuntu ${fallback_codename} main" | sudo tee "$list_file" >/dev/null
+                wait_for_apt
+                apt_get update -yq || log_quiet "apt-get update zakończył się błędem." "apt-get update failed."
+            else
+                sudo rm -f "$keyring_file" "$list_file" 2>/dev/null || true
+            fi
+        fi
+    fi
+
     install_apt_pkgs "${packages[@]}"
 
     all_installed=1
@@ -356,7 +396,10 @@ add_ppa_and_install() {
         return 0
     fi
 
-    sudo env DEBIAN_FRONTEND=noninteractive LC_ALL=C.UTF-8 add-apt-repository --remove -y "ppa:$ppa" || true
+    if [[ "$added_via_cmd" -eq 1 ]]; then
+        sudo env DEBIAN_FRONTEND=noninteractive LC_ALL=C.UTF-8 add-apt-repository --remove -y "ppa:$ppa" || true
+    fi
+    sudo rm -f "$list_file" "$keyring_file" 2>/dev/null || true
     wait_for_apt
     apt_get update -yq || log_quiet "apt-get update zakończył się błędem." "apt-get update failed."
     return 1
@@ -534,7 +577,8 @@ SYSTEM_PKGS=(
     libayatana-appindicator3-1 gamemode mangohud vkd3d-compiler winetricks
     gcc g++ make cmake meson ninja-build pkg-config
     ghostwriter gnome-disk-utility zram-tools
-    zsh zsh-syntax-highlighting zsh-autosuggestions
+    zsh zsh-syntax-highlighting zsh-autosuggestions fastfetch
+    cdemu-client cdemu-daemon vhba-dkms
     wine wine64
     handbrake handbrake-cli
     virt-manager qemu-system qemu-utils libvirt-daemon-system libvirt-clients
@@ -595,9 +639,7 @@ fi
 
 show_progress 7 $TOTAL_STEPS "$MSG_PHASE_2"
 
-add_ppa_and_install "cdemu/ppa" cdemu-daemon cdemu-client || true
 add_ppa_and_install "atareao/telegram" telegram || true
-add_ppa_and_install "zhangsongcui3371/fastfetch" fastfetch || true
 add_ppa_and_install "faugus/faugus-launcher" faugus-launcher || true
 
 sudo depmod -a || true
